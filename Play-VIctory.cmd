@@ -61,11 +61,6 @@ rem The driver's background shader work off (2026-11-27): in a profiled minute i
 rem four "D3D Background Thread"s took 37 % of the processor time the game took in all, while the card
 rem was 22 % busy and the frames waited for the processor. VICTORY_D3D12_BACKGROUND=1: on, as before.
 if not defined VICTORY_D3D12_BACKGROUND set "VICTORY_D3D12_BACKGROUND=0"
-rem The heaps' records looked for at the game's submit call (2026-11-27): in a crowded street the thread that
-rem prepares submissions waited 2.9 ms a frame for them, 0.1 with this (fps 17.7 to 19.5, RTX 5070 Ti, no
-rem visual change seen). VICTORY_HEAP_SYNC_AT_CALL=0: when that thread comes to the submission, as before.
-rem Off by default again (2026-11-27): with it the textures flickered and black shapes showed in town, which
-rem the original copy without it does not. VICTORY_HEAP_SYNC_AT_CALL=1 before the launcher to try it.
 rem The game's single stores into watched memory done for it, without opening the memory (2026-11-27):
 rem in an A/B run of 41 phases in town (RTX 5070 Ti, diagnostics build) frames were 3.3 ms shorter with it,
 rem corrected for the draws in each phase (VICTORY_COPY_BESIDE: 0.5 ms, not set). VICTORY_STORE_BESIDE=0: off.
