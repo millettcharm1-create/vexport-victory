@@ -738,6 +738,8 @@ pub(super) fn submit(this: This, lists: &[This]) {
         if recordings.is_empty() {
             return;
         }
+        // A head start for the heaps' records (`VICTORY_HEAP_SYNC_AHEAD`).
+        crate::descriptor::sync_heaps_ahead();
         let before = QUEUED.fetch_add(1, Relaxed);
         STATS[DEPTH].fetch_add(before, Relaxed);
         STATS[DEEPEST].fetch_max(before + 1, Relaxed);
@@ -746,6 +748,7 @@ pub(super) fn submit(this: This, lists: &[This]) {
         return;
     }
     let jobs = jobs_of(this, lists);
+    crate::descriptor::sync_heaps_ahead();
     let runs = jobs.iter().filter(|j| j.runs()).count() as u64;
     let before = QUEUED.fetch_add(runs, Relaxed);
     STATS[RUNS].fetch_add(runs, Relaxed);
