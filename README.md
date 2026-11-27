@@ -1,116 +1,116 @@
-# VIctory on an RX 7900 XTX
+# Vexport-Victory
 
-## Run the codec_d Windows build
+Vexport-Victory is a fork of [VIctory](https://github.com/Marvisak/VIctory), a
+compatibility layer that runs an Xbox Series title natively on Windows from files
+the user supplies. This fork is tuned and fixed for an **NVIDIA RTX 50-series
+card** (developed on an RTX 5070 Ti with 16 GB) and played with **keyboard and
+mouse**.
 
-Download and extract the Windows x64 ZIP from the [private releases](https://github.com/codec-d/cool_fox/releases/latest). Open PowerShell in the extracted folder and point the launcher at your own complete Xbox dump.
+**This repository contains no game files, code or assets.** You need your own
+complete dump of the game. It is not affiliated with or endorsed by the game's
+developer or publisher.
+
+## Requirements
+
+- Windows 10/11 x64, a CPU with AVX2
+- A Direct3D 12 GPU with shader model 6.6 and mesh shaders (tested: RTX 5070 Ti 16 GB)
+- 32 GB of RAM at least; close browsers and other large programs while playing
+- The pinned Rust toolchain, the MSVC C++ build tools and a Windows SDK
+- Your own dump of the title
+
+## Build and run
 
 ```powershell
-$env:VICTORY_GAME_DIR = 'D:\Games\MyDump'
+cargo build --release --locked -p victory
+$env:VICTORY_GAME_DIR = 'D:\Games\MyDump'      # the folder with your copy's executable
 .\Play-VIctory.cmd pareto-residency
 ```
 
-The launcher selects Series S and the RTX-tested residency settings. It builds its shader cache locally under `%LOCALAPPDATA%\VIctory\cache-pareto`. Set `VICTORY_CACHE_DIR` to reuse an existing cache outside the checkout. Windows x64, an AVX2 CPU, and a Direct3D 12 GPU with shader model 6.6 and mesh shader support are required.
+`Play-VIctory.cmd` picks the Series S profile and the settings this fork was tested
+with, and writes a log of each session to `%LOCALAPPDATA%\VIctory\logs`. The shader
+cache lives in `%LOCALAPPDATA%\VIctory\cache-pareto`; a first run with a new build
+fills it and stutters for a while. `target\release\victory.exe shaders <the shader
+archives>` translates every shader ahead of time.
 
-To build from this checkout, install the pinned Rust toolchain and the MSVC C++ build tools with a Windows SDK, then run `cargo build --release --locked -p victory`. The same launcher finds `target\release\victory.exe`. The sections below describe the upstream AMD fork and its separate launcher.
+Copy `victory.example.toml` to `victory.toml` to keep your paths there instead; keep
+every path outside this folder ([docs/asset-policy.md](docs/asset-policy.md)).
 
-A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer
-that runs an Xbox Series title natively on Windows from files the user supplies.
-This one is about **speed on AMD RDNA 3**: the world at 30 frames a second on
-one PC, without giving up the picture. It is not there yet.
+## Controls
 
-**This repository contains no game files, code or assets.** You need your own
-copy of the game. It is not affiliated with or endorsed by the game's developer
-or publisher.
+The title is a console game and only knows a controller, so with no controller
+plugged in the keyboard and mouse stand in for one, laid out like Grand Theft Auto
+V's keyboard controls:
 
-## Where it stands (2026-11-25)
+| Keys | On foot | In a vehicle |
+|------|---------|--------------|
+| W A S D | move | W throttle, S brake and reverse, A D steer |
+| Mouse | look | look |
+| Right / left mouse button | aim / fire | aim / fire |
+| Left Shift | sprint | |
+| Space | jump | handbrake |
+| C, Left Ctrl | crouch | C looks behind |
+| R | reload | |
+| F | get in or out of a vehicle | get out |
+| Q | cover | |
+| E | context action | horn |
+| Tab | weapon wheel | weapon wheel |
+| V | camera view | camera view |
+| Esc | pause | pause |
+| Arrow keys | D-pad | D-pad |
+| P (or F2) | switch between the two columns | |
+| F1 | free the mouse pointer, and take it again | |
 
-Tested on one machine only: Windows 11, Intel i9-12900K, 64 GB RAM, Radeon
-RX 7900 XTX, 1440p, the Series X profile.
+F switches to the driving keys as you get in and back as you get out. When the game
+puts you in a vehicle itself (a mission start, after a cutscene), press P once. The
+full table and how to rebind keys are in [docs/README-fxceless.md](docs/README-fxceless.md).
 
-| | |
-|---|---|
-| Menus, videos, loading screens | 30 fps |
-| Prologue, indoors | 50-75 ms a frame (13-20 fps) |
-| First mission with the boat | 46-53 ms (19-22 fps) |
-| Street chase with many cars and people | 100-165 ms (6-10 fps), single frames far longer |
-| Outdoors on foot, the camp | 60-90 ms |
-| Flying | 42-57 ms |
-| Longest session so far | 41 minutes, no crash |
-| Memory | 40-46 GB of private memory: **64 GB of RAM recommended** |
+## What this fork changes
 
-It started at 280 ms a frame in the same scenes two days earlier.
+- **Colour banding fixed**: the final colour grading reads its 3D tables with the
+  blending done in the shader, which the RTX card's own filtering did not give
+  (`VICTORY_VOLUME_FILTER=0` turns it off).
+- **No grey wash**: the picture goes to the screen as the game encoded it, without a
+  second tone curve (`VICTORY_DISPLAY_FILMIC=1` brings the old curve back).
+- **Grey blocks in the sky fixed**: the game's clears of unordered access views are
+  carried out (`VICTORY_CLEAR_UNORDERED=0`: not).
+- **Skin painted right**: the textures a character's skin is painted from are loaded
+  even when the card is full (`VICTORY_BAKE_OVER_ROOM=0`: not).
+- **More of the card for textures**: the launcher keeps less memory back for
+  render targets and loads textures up to 94 % of the card's budget.
+- **Water lighting**: the water's transmission passes run on 32-lane cards
+  (`VICTORY_WAVE_WIDE_WATER`; the launcher sets 6, see below).
+- **Keyboard and mouse** laid out as above, with automatic driving keys.
 
-What is known to be wrong:
+## Known issues
 
-- Trees, plants and far buildings flicker outdoors in some places.
-- Indoor lighting uses a scene-matched ambient estimate by default when
-  `-RayTracing` is off. It is an approximation, so the full ray-traced option
-  remains the most faithful look.
-- Textures of what just came into view appear late while the title streams.
-- The first run with a new driver or a new build stutters while the driver makes
-  pipelines (`victory warm` makes them ahead).
-- Recording a frame in the world makes the title's own watchdog end it.
+- Two of the water's tiled lighting passes leave black rectangles on the water, so
+  the launcher keeps them off: some stretches of water look white or foamy instead.
+- Walls and floors can vanish for a single frame in some places.
+- The card's memory fills up in busy scenes: some textures and models load late.
+- Pale rectangles can show in the sky.
+- The sun can show as a black disc.
 
-## How to run it
+## For developers
 
-You need Windows 10/11 x64, a CPU with AVX2, a Direct3D 12 GPU with shader
-model 6.6 and mesh shaders, Rust (the toolchain is pinned), the MSVC build
-tools, and your own dump of the title.
-
-```powershell
-git clone https://github.com/avatarmanz/VIctory-7900XTX
-cd VIctory-7900XTX
-copy victory.example.toml victory.toml      # then set your paths, outside this folder
-cargo build --locked --profile diag -p victory --features diagnostics
-scripts\play.ps1 -Exe <path of your copy's executable>
-```
-
-`scripts\play.ps1 -Safe` leaves out the newest, faster ways; try it first when
-something is wrong. `-RayTracing` turns the title's ray-traced indirect light on.
-
-Before the first run, ahead of time (both can be stopped and go on later):
-
-```powershell
-target\diag\victory.exe shaders <the shader archives>   # every shader translated, minutes
-target\diag\victory.exe warm --used                     # pipelines earlier runs drew with, for a new driver or build
-```
-
-Commands, debugging switches and upstream's own description:
-[docs/README-fxceless.md](docs/README-fxceless.md). Every `VICTORY_...` switch is
-described in a comment where it is read.
-
-## What is different here
-
-In short; the reasons and the measurements are in [docs/findings.md](docs/findings.md).
-
-- **List calls are written down, not carried out, on the title's threads**
-  (`VICTORY_THIN`): eight threads of ours translate them.
-- **Submissions are prepared by a thread of ours and joined**
-  (`VICTORY_ASYNC_SUBMIT`, `VICTORY_JOIN_PARTS`), with what can be spread over
-  threads spread: refreshes, compares (AVX2), descriptor records, landings.
-- **What shaders wrote comes back beside the write guards**, by the dwords that
-  changed, on a thread of its own (`VICTORY_RELAY`, `VICTORY_LAND`).
-- **Buffer fills that need bytes still on the card are done on the card**
-  (`VICTORY_CARD_STEPS`) instead of waiting for it.
-- **The title's writes are caught more cheaply**: one view opened at a fault,
-  blocks that rest, places in the title's code that look before they write.
-- **Textures go up on a copy queue of their own** and a slot shows one only after
-  its upload ran, which also ended a device loss that came every 15 minutes or so.
-- **Boats float**: textures that shaders write and the title's CPU reads go back
-  to title memory (from fxceless and Geckomacabre, on by default here).
-- **Frame record and replay** with per-pass times and shader variants compared
-  turn by turn ([docs/replay.md](docs/replay.md)).
+`CLAUDE.md` and [docs/architecture.md](docs/architecture.md) describe the code;
+[docs/README-fxceless.md](docs/README-fxceless.md) lists the commands and debugging
+switches. Every `VICTORY_...` switch is described in a comment where it is read.
+`cargo test --workspace --locked` runs without game data, and `cargo xtask policy`
+checks that nothing from the game is in the tree.
 
 ## Credits
 
-This is a tree of other people's work with more on top. The history is kept, and
-commits taken from elsewhere name the commit and its author.
+This is a tree of other people's work with more on top.
 
 - **[VIctory](https://github.com/Marvisak/VIctory)** by Marvisak and its
   contributors: the loader, the runtime services, the Direct3D 12 back end and
   the shader recompiler.
-- **[fxceless/victory-fork](https://github.com/fxceless/victory-fork)**: the fork
-  this one started from, and the people whose pull requests it carries.
+- **[avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX)**:
+  the AMD RX 7900 XTX fork this one is built on, with its speed work (list calls
+  translated on threads of ours, joined submissions, the relay, card-side steps,
+  frame record and replay; [docs/findings.md](docs/findings.md)).
+- **[fxceless/victory-fork](https://github.com/fxceless/victory-fork)** and the
+  people whose pull requests it carries.
 - **[DexNom/VIctory](https://github.com/DexNom/VIctory)**: ray tracing fixes,
   cube gradients, sparse textures.
 - **[Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD)**:
@@ -120,14 +120,12 @@ commits taken from elsewhere name the commit and its author.
   every view of a page (with Spexivus, joroyt and tightfall), and Joshua Odom's
   reads into title memory.
 - **Geckomacabre** and **cxy0072019-sketch**: the texture read-back.
+- **codec_d**: the Windows build and the RTX residency settings the launcher uses.
 - **[XCL](https://github.com/ivall/xcl)** (GPL-2.0-only) was read for how the same
   title behaves under another layer; no code of it is here.
-- This fork's changes were made with [Claude Code](https://claude.com/claude-code).
+- Changes in this fork were made with [Claude Code](https://claude.com/claude-code).
 
 ## License
 
 GPL-3.0-or-later, as VIctory. See [LICENSE](LICENSE); the one file that is not
 covered is named in [docs/asset-policy.md](docs/asset-policy.md).
-"# vexport-victory" 
-"# vexport-victory" 
-"# vexport-victory" 
