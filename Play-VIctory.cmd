@@ -61,6 +61,10 @@ rem The driver's background shader work off (2026-11-27): in a profiled minute i
 rem four "D3D Background Thread"s took 37 % of the processor time the game took in all, while the card
 rem was 22 % busy and the frames waited for the processor. VICTORY_D3D12_BACKGROUND=1: on, as before.
 if not defined VICTORY_D3D12_BACKGROUND set "VICTORY_D3D12_BACKGROUND=0"
+rem The heaps' records looked for at the game's submit call (2026-11-27): in a crowded street the thread that
+rem prepares submissions waited 2.9 ms a frame for them, 0.1 with this (fps 17.7 to 19.5, RTX 5070 Ti, no
+rem visual change seen). VICTORY_HEAP_SYNC_AT_CALL=0: when that thread comes to the submission, as before.
+if not defined VICTORY_HEAP_SYNC_AT_CALL set "VICTORY_HEAP_SYNC_AT_CALL=1"
 rem Frames up to 60 a second (2026-11-27): the title asks for a 30th of a second between frames as a
 rem Series S and as a Series X; our frame clock ticks every 60th instead (frame.rs `fps_asked`), and the
 rem world kept its speed. 240, the most the clock allows: frames as fast as the PC makes them up to
