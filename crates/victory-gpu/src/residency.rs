@@ -90,6 +90,11 @@ pub(crate) fn allow_staging_growth(bake: bool) -> bool {
     has_growth_reserve(sample_commit(now), bake)
 }
 
+/// The PC's memory in bytes, from `GlobalMemoryStatusEx`.
+pub(crate) fn total_memory() -> Option<u64> {
+    memory_status().map(|s| s.ullTotalPhys)
+}
+
 pub(crate) fn limited_host_ram() -> bool {
     static LIMITED: OnceLock<bool> = OnceLock::new();
     *LIMITED.get_or_init(|| memory_status().is_some_and(|s| s.ullTotalPhys <= 32 * GIB))

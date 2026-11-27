@@ -4,8 +4,10 @@
 //! * [`policy`]: the runtime half of rule #1, refusing to write
 //!   game-derived data into the source tree.
 //! * [`logging`]: one tracing setup for all binaries.
+//! * [`cpu`]: whose processor the PC has, and the preset that follows.
 
 pub mod config;
+pub mod cpu;
 pub mod logging;
 pub mod policy;
 

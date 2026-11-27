@@ -893,7 +893,39 @@ fn unlike(dst: This, src: This) -> bool {
             tracing::warn!(?dst, ?src, "copy between a stand-in target and title-format texels skipped")
         });
     }
+    unlike || unlike_levels(dst, src)
+}
+
+/// Whether the host copies of two textures begin at different levels of
+/// the title's (`crate::resource::copy_level`: a texture at half detail on
+/// a smaller card): a copy of the whole resource between them has no shape
+/// the host allows (logged once).
+#[cfg(windows)]
+fn unlike_levels(dst: This, src: This) -> bool {
+    let unlike = crate::resource::copy_level(dst) != crate::resource::copy_level(src);
+    if unlike {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| tracing::warn!(?dst, ?src, "copy between textures kept at different detail skipped"));
+    }
     unlike
+}
+
+/// A subresource location of title texture `title` as one of its host
+/// copy, which begins at the title's level [`crate::resource::copy_level`]:
+/// `None` for a level the host copy leaves out. (Such copies begin only for
+/// 2D textures of one layer: a subresource is a level.)
+#[cfg(windows)]
+fn at_copy_level(location: CopyLocation, title: This) -> Option<CopyLocation> {
+    const FOOTPRINT: u32 = 1;
+    let base = crate::resource::copy_level(title);
+    if location.kind == FOOTPRINT || base == 0 {
+        return Some(location);
+    }
+    let index = location.footprint.offset as u32;
+    let index = index.checked_sub(base)?;
+    let mut location = location;
+    location.footprint.offset = (location.footprint.offset & !0xffff_ffff) | u64::from(index);
+    Some(location)
 }
 
 /// Copies left out because both sides were one host texture
@@ -1097,6 +1129,12 @@ extern "system" fn copy_texture_region(
                 ensure_state(list, src.resource, COPY_SOURCE);
             }
             from.resource = texture.as_raw().cast_const().cast();
+            // A level the host copy of the source leaves out: nothing to
+            // copy (the host copy is at half detail).
+            match at_copy_level(from, src.resource) {
+                Some(at) => from = at,
+                None => return,
+            }
         }
         // A depth texture shaders also write: what they wrote, first (the
         // source above too).
@@ -1144,8 +1182,12 @@ extern "system" fn copy_texture_region(
             SELF_COPIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return;
         }
+        // A level the host copy of the destination leaves out is not
+        // copied into (the host copy is at half detail).
+        let Some(mut to_location) = at_copy_level(dst, dst.resource) else {
+            return;
+        };
         ensure_state(list, dst.resource, COPY_DEST);
-        let mut to_location = dst;
         to_location.resource = to.as_raw().cast_const().cast();
         let host_box = (!source_box.is_null()).then(|| source_box.cast::<D3D12_BOX>());
         #[cfg(feature = "diagnostics")]
@@ -1229,7 +1271,7 @@ fn read_back(
         crate::texture::upload(list, src.resource, texture);
     }
     ensure_state(list, src.resource, COPY_SOURCE);
-    let mut from = src;
+    let mut from = at_copy_level(src, src.resource).ok_or("a level the host copy leaves out")?;
     from.resource = texture.as_raw().cast_const().cast();
     let mut to = dst;
     to.resource = buffer.as_raw().cast_const().cast();

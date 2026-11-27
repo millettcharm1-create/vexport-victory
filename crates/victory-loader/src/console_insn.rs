@@ -1,6 +1,8 @@
 //! Instructions the console's CPU (Zen 2) has and an Intel PC's lacks, emulated: the title's
 //! code raises STATUS_ILLEGAL_INSTRUCTION on them (the title zeroes memory with a `clzero` loop at
-//! its first frames), and the vectored handler steps over them here.
+//! its first frames), and the vectored handler steps over them here. With the Intel preset
+//! (`victory_core::cpu`) the title's `mwaitx` waits give the processor away at each pass
+//! ([`yields_waits`]) instead of spinning.
 //!
 //! Ported from XCL (github.com/ivall/xcl, GPL-2.0-only): `insn.rs` (decoder, as
 //! `console_insn_decode.rs`, unchanged) and `eh.rs` `emulate_console_only`.
@@ -55,6 +57,37 @@ static ZEROED: AtomicU64 = AtomicU64::new(0);
 fn patches_waits() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_PATCH_WAITS").is_none_or(|v| v != "0"))
+}
+
+/// Says once in the log whose processor the PC has, the preset that follows
+/// (`victory_core::cpu::preset`) and what it does with the title's waits.
+pub fn log_cpu_preset() {
+    tracing::info!(
+        cpu = ?victory_core::cpu::vendor(),
+        preset = ?victory_core::cpu::preset(),
+        waits_yield = yields_waits(),
+        "the processor's preset (VICTORY_CPU_PRESET=amd|intel to choose)"
+    );
+}
+
+/// Whether an `mwaitx` gives the processor away (`SwitchToThread`) instead of
+/// becoming a `pause`: with the Intel preset (`victory_core::cpu::preset`),
+/// unless `VICTORY_WAIT_YIELD=0`; `=1` with the AMD one too (where the
+/// instruction faults only on a processor that lacks it). Patched to
+/// `pause`, each of the title's waits spins: on a 12-thread Intel PC every
+/// thread that waited held a core at full use (2026-11-27), where on the
+/// console's processor the wait sleeps the core. So `mwaitx` is left to
+/// fault, and each pass of the wait lets another thread run on the core:
+/// a trip into Windows of a few microseconds, which the title's wait loop
+/// would have spent waiting anyway. `monitorx` is still patched (it only
+/// says what to wait for).
+fn yields_waits() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| match std::env::var("VICTORY_WAIT_YIELD").as_deref() {
+        Ok("0") => false,
+        Ok("1") => true,
+        _ => victory_core::cpu::preset() == victory_core::cpu::Preset::Intel,
+    })
 }
 
 /// What replaces the 3 bytes of a wait instruction.
@@ -407,6 +440,10 @@ pub(crate) unsafe fn emulate(ctx: &mut CONTEXT) -> i32 {
                 }
             }
         }
+        ConsoleOnly::Mwaitx if yields_waits() => {
+            // SAFETY: a plain call that gives the rest of the time slice away.
+            unsafe { windows_sys::Win32::System::Threading::SwitchToThread() };
+        }
         ConsoleOnly::Monitorx | ConsoleOnly::Mwaitx => {
             // Without a prefix, so 3 bytes: replaced, the next pass does not fault.
             if len == 3
@@ -574,7 +611,8 @@ mod tests {
                 assert_eq!(emulate(&mut context), CONTINUE_EXECUTION);
                 assert_eq!(context.Rip, rip as u64 + 3);
             }
-            if patches_waits() {
+            // (With the Intel preset `mwaitx` is left to fault: `yields_waits`.)
+            if patches_waits() && !yields_waits() {
                 let now = std::slice::from_raw_parts(page.add(6), 7);
                 assert_eq!(now, [0x0f, 0x1f, 0x00, 0xf3, 0x90, 0x90, 0xc3]);
                 // They run now.

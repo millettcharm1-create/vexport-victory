@@ -61,6 +61,8 @@ pub mod queue;
 #[cfg(all(windows, feature = "diagnostics"))]
 pub mod replay;
 #[cfg(windows)]
+mod machine;
+#[cfg(windows)]
 mod residency;
 pub mod resource;
 pub mod root;

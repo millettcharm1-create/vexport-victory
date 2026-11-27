@@ -55,6 +55,27 @@ rem budget kept for render targets, 768 to 3,072 MB, and textures loaded until a
 rem budget is left), and says what it picked in the log ("fitted to this card"). Fixed values tuned on
 rem a 16 GB card filled a 12 GB one (2026-11-26). Set VICTORY_CARD_ROOM_FOR_TARGETS_MB or
 rem VICTORY_TEXTURE_ROOM_PERCENT before the launcher to choose yourself.
+rem Shaders translated before the game, once per build of the runner (2026-11-27): on a fresh cache the
+rem title translated 1,022 shaders and waited on about 1,000 pipelines while it played, every processor
+rem busy and 1 to 3 frames a second for minutes (a 12-thread PC with a 12 GB card). This does it ahead,
+rem with every processor, and writes down the build it did it for. VICTORY_PREPARE=0: not; =1: again.
+set "ready=%VICTORY_CACHE_DIR%\shaders-ready.txt"
+set "stamp="
+for %%A in ("%runner%") do set "stamp=%%~zA %%~tA %VICTORY_WAVE_WIDE_WATER%"
+set "had="
+if exist "%ready%" set /p had=<"%ready%"
+if "%VICTORY_PREPARE%"=="1" set "had="
+if "%VICTORY_PREPARE%"=="0" goto prepared
+if "%had%"=="%stamp%" goto prepared
+if not exist "%VICTORY_GAME_DIR%\shaders.rpf" goto prepared
+echo Preparing the game's shaders for this PC. This happens once per new build and takes a few
+echo minutes with the processor fully busy; the game starts when it is done.
+"%runner%" shaders "%VICTORY_GAME_DIR%\shaders.rpf"
+if not errorlevel 1 (
+  if not exist "%VICTORY_CACHE_DIR%" mkdir "%VICTORY_CACHE_DIR%"
+  >"%ready%" echo %stamp%
+)
+:prepared
 rem A log of the run, outside the checkout (it holds what the title did): the info lines, among
 rem them the frame line every few seconds that says where a frame's time went and how many draws
 rem were dropped. VICTORY_PLAY_LOG=0: no file, and warnings on the console as before.

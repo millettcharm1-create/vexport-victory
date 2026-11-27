@@ -50,6 +50,10 @@ pub fn run(
     if execute {
         check_cpu_features()?;
     }
+    // Whose processor the PC has, and the preset that follows
+    // (`victory_core::cpu`): with Intel's the title's waits give the
+    // processor away.
+    victory_loader::log_cpu_preset();
     // A title that relaunched itself: the old process must be gone first.
     victory_hle::modules::lifecycle::wait_for_previous();
     let cfg = victory_core::Config::load()?;

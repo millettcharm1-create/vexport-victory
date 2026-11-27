@@ -28,9 +28,12 @@ $env:VICTORY_GAME_DIR = 'D:\Games\MyDump'      # the folder with your copy's exe
 
 `Play-VIctory.cmd` picks the Series S profile and the settings this fork was tested
 with, and writes a log of each session to `%LOCALAPPDATA%\VIctory\logs`. The shader
-cache lives in `%LOCALAPPDATA%\VIctory\cache-pareto`; a first run with a new build
-fills it and stutters for a while. `target\release\victory.exe shaders <the shader
-archives>` translates every shader ahead of time.
+cache lives in `%LOCALAPPDATA%\VIctory\cache-pareto`. The first launch with a new
+build prepares the game's shaders for your PC before the game starts: a few minutes
+with the processor fully busy, once. Without it the game does that work while you
+play, at a few frames a second. `VICTORY_PREPARE=0` skips it, `VICTORY_PREPARE=1`
+does it again. The first minutes in the world can still stutter while the graphics
+driver builds what it needs; that goes away as its cache fills.
 
 Copy `victory.example.toml` to `victory.toml` to keep your paths there instead; keep
 every path outside this folder ([docs/asset-policy.md](docs/asset-policy.md)).
@@ -64,6 +67,24 @@ F switches to the driving keys as you get in and back as you get out. When the g
 puts you in a vehicle itself (a mission start, after a cutscene), press P once. The
 full table is in [docs/README-fxceless.md](docs/README-fxceless.md).
 
+## Presets, picked for your PC
+
+Nothing to set: at start the layer looks at the PC and says in the log what it
+picked ("the processor's preset", "this PC, and the tier").
+
+- **AMD processor**: the console's own kind of processor; the game's code runs
+  as it is.
+- **Intel processor**: the game uses a few AMD-only instructions, which the layer
+  emulates. Its waits, which sleep the core on AMD, now give the core to another
+  thread instead of spinning on it, so the CPU isn't held at full use while the
+  game's threads wait. `VICTORY_CPU_PRESET=amd` or `=intel` picks one yourself.
+- **Low tier**: for an 8 GB card or smaller, fewer than 8 CPU threads, or 16 GB
+  of RAM or less. The game is told the display is 1280x720 instead of 4K, so it
+  may draw fewer pixels (not tested yet: the log's "depth texture" lines show
+  the size it renders at). `VICTORY_TIER=standard` or `=low` picks one yourself.
+- **Texture detail by card**: full on 16 GB cards; large textures at half detail
+  on 12 GB cards; most textures at half detail on 8 GB cards.
+
 ## What this fork changes
 
 - **Colour banding fixed**: the final colour grading reads its 3D tables with the
@@ -79,8 +100,12 @@ full table is in [docs/README-fxceless.md](docs/README-fxceless.md).
   the card may get with textures, and how many threads translate and compile
   follow the card's memory and the processor count, so a 12 GB or 8 GB card
   and a 6- or 8-core processor are not run as hard as a 16 GB card and a
-  16-thread one. The log says what it picked ("fitted to this card",
-  "pipeline workers").
+  16-thread one. On a card with less than 13 GB of budget (12 GB and smaller),
+  textures of 1024 texels and more on a side are kept one level down, at half
+  the detail and a quarter of the memory, because the game needs more than such a
+  card has (`VICTORY_TEXTURE_DETAIL=full` keeps full detail, `=2048` drops only
+  the largest). The log says what it picked ("fitted to this card", "texture
+  detail", "pipeline workers").
 - **Water lighting**: the water's transmission passes run on 32-lane cards
   (`VICTORY_WAVE_WIDE_WATER`; the launcher sets 6, see below).
 - **Keyboard and mouse** laid out as above, with automatic driving keys.
@@ -133,4 +158,3 @@ This is a tree of other people's work with more on top.
 
 GPL-3.0-or-later, as VIctory. See [LICENSE](LICENSE); the one file that is not
 covered is named in [docs/asset-policy.md](docs/asset-policy.md).
-"# vexport-victory" 

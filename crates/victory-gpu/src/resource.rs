@@ -1296,6 +1296,66 @@ fn base_level(desc: &ResourceDesc, first: u32) -> u32 {
     base
 }
 
+/// The level a host copy of a placed texture begins at for views that start
+/// at `first`: [`base_level`], one level further on for a texture whose
+/// level 0 is [`detail_side`] texels or more on its longer side.
+#[cfg(windows)]
+fn copy_base(desc: &ResourceDesc, first: u32) -> u32 {
+    let large = detail_side().is_some_and(|side| desc.width.max(u64::from(desc.height)) >= side);
+    base_level(desc, if large { first.max(1) } else { first })
+}
+
+/// Textures from which size on (their longer side at level 0) the host copy
+/// leaves out level 0, so that they take a quarter of the card's memory, at
+/// half the detail: `VICTORY_TEXTURE_DETAIL=<side>` (`full`: none), else
+/// [`detail_side_for`] the card's budget when it is first asked.
+///
+/// The title asks for more of the card than a 12 GB card has: on an
+/// RTX 5070 (budget 10.5 GB) the card stood at 12.0 GB in use, with 5.6 GB
+/// more of the PC's memory shared with it, the frame at 290 ms on the card
+/// and 2.7 frames a second (2026-11-27); on a 16 GB card the same places
+/// took 10.5 to 12.7 GB. Most of it is the title's textures (7.4 GB of host
+/// copies of textures it fills).
+#[cfg(windows)]
+fn detail_side() -> Option<u64> {
+    static SIDE: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *SIDE.get_or_init(|| {
+        let asked = std::env::var("VICTORY_TEXTURE_DETAIL").ok();
+        let budget = crate::host::host().and_then(|h| h.video_memory()).map_or(0, |[budget, ..]| budget);
+        let side = match asked.as_deref().map(str::trim) {
+            Some("full") | Some("0") => None,
+            Some(v) => match v.parse::<u64>() {
+                Ok(side) => Some(side.max(64)),
+                Err(_) => detail_side_for(budget),
+            },
+            None => detail_side_for(budget),
+        };
+        tracing::info!(
+            budget_mb = budget >> 20,
+            from_side = side.unwrap_or(0),
+            "texture detail, fitted to this card (0: full; VICTORY_TEXTURE_DETAIL=full or a side to choose)"
+        );
+        side
+    })
+}
+
+/// [`detail_side`] for a card whose budget is `budget` bytes: full detail
+/// from 13 GB of budget on (a 16 GB card); textures of 1024 texels and more
+/// on a side at half from 9 GB on (a 12 GB card, budget about 10.5 GB); of
+/// 512 and more below (an 8 GB card, about 7.3 GB, which the title's 10.5
+/// GB and more fit only with most of its textures at half). 0 (no budget
+/// known): full.
+fn detail_side_for(budget: u64) -> Option<u64> {
+    const MB: u64 = 1 << 20;
+    if budget == 0 || budget >= 13_000 * MB {
+        None
+    } else if budget >= 9_000 * MB {
+        Some(1024)
+    } else {
+        Some(512)
+    }
+}
+
 /// The bytes of title memory a placed texture with the resource description
 /// `desc` is read from for a view that starts at level `first`; `None` as
 /// [`placed_bytes`]. Remembered: asked for every slot that is looked at.
@@ -1353,7 +1413,7 @@ pub(crate) fn want_level(this: This, first: u32) {
         r.host.wanted.fetch_min(first, Relaxed);
         return;
     };
-    if host.base == 0 || host.base <= base_level(&r.desc, first) {
+    if host.base == 0 || host.base <= copy_base(&r.desc, first) {
         return;
     }
     r.host.wanted.store(first, Relaxed);
@@ -1582,7 +1642,9 @@ fn hosted(this: This, make: bool) -> Option<Made> {
             let viewed = crate::descriptor::host::first_viewed(r.data() as u64).unwrap_or(u32::MAX);
             let first = wanted.min(viewed);
             if first != u32::MAX {
-                base = base_level(&r.desc, first);
+                base = copy_base(&r.desc, first);
+            } else if detail_side().is_some() {
+                base = copy_base(&r.desc, 0);
             }
         }
         let texture = match texture {
@@ -1828,6 +1890,16 @@ mod room_percent_tests {
         assert_eq!(room_percent_for(3_500 * MB), 88);
         assert_eq!(room_percent_for(30_000 * MB), 94);
         assert_eq!(room_percent_for(0), 90);
+    }
+
+    #[test]
+    fn a_smaller_card_gets_more_of_its_textures_at_half_detail() {
+        use super::detail_side_for;
+        const MB: u64 = 1 << 20;
+        assert_eq!(detail_side_for(14_600 * MB), None);
+        assert_eq!(detail_side_for(10_500 * MB), Some(1024));
+        assert_eq!(detail_side_for(7_300 * MB), Some(512));
+        assert_eq!(detail_side_for(0), None);
     }
 
     #[test]
@@ -2453,6 +2525,22 @@ pub(crate) fn host_resource<'a>(
     // list and no slot holds and that nothing asked for in seconds (the
     // asking just made is noted under the same lock).
     Some(unsafe { &*std::ptr::from_ref(&host.texture) })
+}
+
+/// The title's level that is level 0 of the host copy of `this` (its
+/// `base`: [`copy_base`]), 0 without a host copy. A copy on the card names
+/// the title's levels; the host copy's are this many fewer.
+#[cfg(windows)]
+pub(crate) fn copy_level(this: This) -> u32 {
+    if this.is_null() {
+        return 0;
+    }
+    let r = resource(this);
+    if r.desc.dimension == BUFFER {
+        return 0;
+    }
+    let made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
+    made.as_ref().map_or(0, |(host, _)| host.base)
 }
 
 /// Whether `this` is a valid title resource created by this runtime.
