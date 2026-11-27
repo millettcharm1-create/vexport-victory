@@ -87,8 +87,10 @@ picked ("the processor's preset", "this PC, and the tier").
   before it allows faster frame intervals. Not tested yet: the log's "frame
   interval" line says what the game chose (33.3 ms is 30 fps, 16.7 ms is 60).
   With 120 Hz the game still chose 30 fps as a Series S. `VICTORY_CONSOLE=series-x`
-  starts it as a Series X instead (more memory, more pixels), to see whether that
-  version allows 60.
+  starts it as a Series X instead (more memory, more pixels): that one chose 30 fps
+  too. `VICTORY_FPS=60` makes the layer's frame clock tick every 16.7 ms whatever
+  the game asks for. Not tested yet: if the world moves too fast, the game counts
+  frames instead of time, and the setting has to stay off.
 - **Texture detail by card**: full on 16 GB cards; large textures at half detail
   on 12 GB cards; most textures at half detail on 8 GB cards.
 

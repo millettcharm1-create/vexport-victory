@@ -39,6 +39,27 @@ fn clock() -> std::sync::MutexGuard<'static, Option<Clock>> {
     CLOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// `VICTORY_FPS=<n>` (30 to 240): frames at most a `n`th of a second apart,
+/// whatever longer interval the title asks for. The title asks for 33.3 ms
+/// (30 a second) as a Series S and as a Series X, with a 60 Hz or a 120 Hz
+/// display (2026-11-27); its frames begin on our clock's ticks, so a shorter
+/// tick lets it begin them sooner. shortcut: if the title's simulation
+/// counts frames instead of time, its world runs that much faster.
+fn fps_asked() -> Option<u32> {
+    static FPS: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *FPS.get_or_init(|| {
+        std::env::var("VICTORY_FPS").ok().and_then(|v| v.trim().parse::<u32>().ok()).map(|n| n.clamp(30, 240))
+    })
+}
+
+/// The interval our clock ticks at for an `asked` one and [`fps_asked`].
+fn paced(asked: Duration, fps: Option<u32>) -> Duration {
+    match fps {
+        Some(n) => asked.min(Duration::from_secs(1) / n),
+        None => asked,
+    }
+}
+
 /// Device method: a frame every `length` microseconds. The period is how
 /// many intervals a frame may take to reach the display (pipeline depth),
 /// not part of the rate.
@@ -49,11 +70,12 @@ pub(crate) extern "system" fn set_interval(
     _period: u32,
     _flags: u32,
 ) -> HRESULT {
-    let interval = match length {
+    let asked = match length {
         0 => SIXTIETH,
         us => Duration::from_micros(u64::from(us)),
     };
-    tracing::info!(?interval, "frame interval");
+    let interval = paced(asked, fps_asked());
+    tracing::info!(?interval, ?asked, "frame interval");
     // A new interval starts from now, after the last tick handed out.
     let first = LAST
         .iter()
@@ -261,5 +283,13 @@ mod tests {
         // Even when a flip wait begins on the tick another just ended on.
         let (tick, _) = next_tick(FLIP);
         assert!(tick > flips[3]);
+    }
+
+    #[test]
+    fn a_frame_rate_asked_for_shortens_the_title_s_interval() {
+        let thirtieth = Duration::from_micros(33_333);
+        assert_eq!(paced(thirtieth, None), thirtieth);
+        assert_eq!(paced(thirtieth, Some(60)), Duration::from_secs(1) / 60);
+        assert_eq!(paced(SIXTIETH, Some(30)), SIXTIETH);
     }
 }
