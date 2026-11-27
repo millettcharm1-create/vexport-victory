@@ -384,16 +384,14 @@ enum Job {
     /// A part of a submission waits for a memory value.
     Value(crate::list::ValueWait),
     /// A submission, or a part of one: the lists' host sides and the order
-    /// they run in; last, the round of the heaps' records its call asked
-    /// (`crate::descriptor::sync_heaps_at_call`; 0: none), as in those below.
-    Run(usize, Vec<crate::list::Detached>, Vec<usize>, u64),
+    /// they run in.
+    Run(usize, Vec<crate::list::Detached>, Vec<usize>),
     /// A submission whose lists are being translated ([`crate::list::thin`]):
     /// the parts of it are known when they are.
-    Lists(usize, Recordings, u64),
+    Lists(usize, Recordings),
     /// Parts taken along with a submission ([`crate::host::joins`]): where they
-    /// begin in the order, and the signals given behind them (the round: the
-    /// latest of theirs).
-    Joined(usize, Vec<crate::list::Detached>, Vec<usize>, Vec<usize>, Vec<(usize, u64)>, u64),
+    /// begin in the order, and the signals given behind them.
+    Joined(usize, Vec<crate::list::Detached>, Vec<usize>, Vec<usize>, Vec<(usize, u64)>),
     /// A signal of the queue's.
     Signal(usize, u64),
     /// A frame is shown: the base texture (and optional overlay plane) and the states their lists leave them in.
@@ -422,7 +420,7 @@ impl Work for Job {
         match self {
             &Job::Wait(fence, value) => Some(Ask::Wait(fence, value)),
             Job::Value(wait) => Some(Ask::Value(*wait)),
-            Job::Lists(_, lists, _) => Some(Ask::Lists(lists.clone())),
+            Job::Lists(_, lists) => Some(Ask::Lists(lists.clone())),
             _ => None,
         }
     }
@@ -432,11 +430,11 @@ impl Work for Job {
     }
 
     fn unfold(self) -> Vec<Self> {
-        let Job::Lists(queue, recordings, round) = self else {
+        let Job::Lists(queue, recordings) = self else {
             return vec![self];
         };
         let lists: Vec<This> = recordings.iter().map(|r| r.back()).collect();
-        let jobs = jobs_of(queue as This, &lists, round);
+        let jobs = jobs_of(queue as This, &lists);
         // It stood for one submission not begun.
         let runs = jobs.iter().filter(|j| j.runs()).count() as u64;
         QUEUED.fetch_add(runs, Relaxed);
@@ -474,8 +472,8 @@ impl Work for Job {
         }
         // Nothing but waits and signals that a submission may follow.
         let (count, lists, signals) = match self {
-            Job::Run(_, lists, order, _) => (1, (&*lists, &*order), &[][..]),
-            Job::Joined(_, lists, order, parts, signals, _) => (1 + parts.len(), (&*lists, &*order), &signals[..]),
+            Job::Run(_, lists, order) => (1, (&*lists, &*order), &[][..]),
+            Job::Joined(_, lists, order, parts, signals) => (1 + parts.len(), (&*lists, &*order), &signals[..]),
             _ => return Err(next),
         };
         let hosts = || lists.1.iter().map(|&i| lists.0[i].host());
@@ -494,7 +492,7 @@ impl Work for Job {
                 }
             }
             Job::Signal(..) => {}
-            Job::Run(_, more, order, _) => {
+            Job::Run(_, more, order) => {
                 let runs: Vec<&crate::host::HostList> = order.iter().map(|&i| more[i].host()).collect();
                 if count >= most || lists.1.len() + runs.len() > most_lists || !crate::host::joinable(hosts(), &runs) {
                     return Err(next);
@@ -503,9 +501,9 @@ impl Work for Job {
             Job::Joined(..) | Job::Present(..) | Job::Lists(..) => return Err(next),
         }
         let taken = std::mem::replace(self, Job::Wait(0, 0));
-        let (queue, mut lists, mut order, mut parts, mut signals, mut round) = match taken {
-            Job::Run(queue, lists, order, round) => (queue, lists, order, Vec::new(), Vec::new(), round),
-            Job::Joined(queue, lists, order, parts, signals, round) => (queue, lists, order, parts, signals, round),
+        let (queue, mut lists, mut order, mut parts, mut signals) = match taken {
+            Job::Run(queue, lists, order) => (queue, lists, order, Vec::new(), Vec::new()),
+            Job::Joined(queue, lists, order, parts, signals) => (queue, lists, order, parts, signals),
             other => {
                 *self = other;
                 return Err(next);
@@ -513,8 +511,7 @@ impl Work for Job {
         };
         let run = matches!(next, Job::Run(..));
         match next {
-            Job::Run(_, more, then, theirs) => {
-                round = round.max(theirs);
+            Job::Run(_, more, then) => {
                 parts.push(order.len());
                 order.extend(then.into_iter().map(|i| i + lists.len()));
                 lists.extend(more);
@@ -523,7 +520,7 @@ impl Work for Job {
             Job::Signal(fence, value) => signals.push((fence, value)),
             _ => {}
         }
-        *self = Job::Joined(queue, lists, order, parts, signals, round);
+        *self = Job::Joined(queue, lists, order, parts, signals);
         Ok(run)
     }
 
@@ -546,24 +543,24 @@ impl Work for Job {
         match self {
             // (A folded one is unfolded, never done.)
             Job::Wait(..) | Job::Value(..) | Job::Lists(..) => {}
-            Job::Run(queue, lists, order, round) => {
+            Job::Run(queue, lists, order) => {
                 let _ = queue;
                 #[cfg(feature = "diagnostics")]
                 crate::capture::op(queue, || format!("RUN submission of {} lists (its thread's)", order.len()));
                 match crate::host::host() {
-                    Some(host) => crate::descriptor::with_call_round(round, || host.execute_late(lists, order)),
+                    Some(host) => host.execute_late(lists, order),
                     None => drop(lists),
                 }
                 QUEUED.fetch_sub(1, Relaxed);
             }
-            Job::Joined(queue, lists, order, parts, signals, round) => {
+            Job::Joined(queue, lists, order, parts, signals) => {
                 let _ = queue;
                 #[cfg(feature = "diagnostics")]
                 crate::capture::op(queue, || {
                     format!("RUN {} parts of submissions in one, {} lists (its thread's)", 1 + parts.len(), order.len())
                 });
                 match crate::host::host() {
-                    Some(host) => crate::descriptor::with_call_round(round, || host.execute_parts(lists, order, &parts)),
+                    Some(host) => host.execute_parts(lists, order, &parts),
                     None => drop(lists),
                 }
                 // (A part that had no list is one all the same.)
@@ -644,6 +641,15 @@ fn number(name: &str) -> Option<usize> {
 thread_local! {
     /// This is the thread that does what is in the line.
     static OURS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// This is the thread that serves the line ([`Lane::serve`]), and not one
+    /// of those that only do work it waits for ([`no_drain_here`]).
+    static SERVING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether this is the thread that serves the line: what it prepares was put
+/// in the line by [`submit`], at the title's call.
+pub(super) fn serving() -> bool {
+    SERVING.get()
 }
 
 /// Whether submissions are prepared by a thread of ours
@@ -683,6 +689,7 @@ fn started() -> bool {
             unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL) };
             crate::cores::keep_on_fast_cores("victory-submit");
             OURS.set(true);
+            SERVING.set(true);
             let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| LANE.serve()));
             if ended.is_err() {
                 // Nothing would ever be sent again, and the title's thread
@@ -744,16 +751,16 @@ pub(super) fn submit(this: This, lists: &[This]) {
         if recordings.is_empty() {
             return;
         }
-        let round = crate::descriptor::sync_heaps_at_call();
+        crate::descriptor::sync_heaps_at_call();
         let before = QUEUED.fetch_add(1, Relaxed);
         STATS[DEPTH].fetch_add(before, Relaxed);
         STATS[DEEPEST].fetch_max(before + 1, Relaxed);
-        LANE.push(queue, [Job::Lists(queue, recordings, round)]);
+        LANE.push(queue, [Job::Lists(queue, recordings)]);
         room(before + 1);
         return;
     }
-    let round = crate::descriptor::sync_heaps_at_call();
-    let jobs = jobs_of(this, lists, round);
+    let jobs = jobs_of(this, lists);
+    crate::descriptor::sync_heaps_at_call();
     let runs = jobs.iter().filter(|j| j.runs()).count() as u64;
     let before = QUEUED.fetch_add(runs, Relaxed);
     STATS[RUNS].fetch_add(runs, Relaxed);
@@ -773,9 +780,8 @@ fn room(queued: u64) {
     }
 }
 
-/// What a submission of `lists` is in the line; `round`, the round of the
-/// heaps' records its call asked.
-fn jobs_of(this: This, lists: &[This], round: u64) -> Vec<Job> {
+/// What a submission of `lists` is in the line.
+fn jobs_of(this: This, lists: &[This]) -> Vec<Job> {
     let queue = this as usize;
     // In one piece up to the first list that waits for a memory value, as
     // `super::submit_cut` runs them; the rest part by part.
@@ -797,12 +803,12 @@ fn jobs_of(this: This, lists: &[This], round: u64) -> Vec<Job> {
     let mut jobs: Vec<Job> = Vec::new();
     if first > 0 {
         let (taken, order) = crate::list::detach(&lists[..first]);
-        jobs.push(Job::Run(queue, taken, order, round));
+        jobs.push(Job::Run(queue, taken, order));
     }
     if first < lists.len() {
         for (waits, taken, order) in crate::list::detach_parts(&lists[first..]) {
             jobs.extend(waits.into_iter().map(Job::Value));
-            jobs.push(Job::Run(queue, taken, order, round));
+            jobs.push(Job::Run(queue, taken, order));
         }
     }
     jobs
