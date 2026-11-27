@@ -5445,8 +5445,8 @@ mod tests {
                     let class = if w.looks > 0 || w.mapped > 0 { &mut again } else { &mut fresh };
                     class.push((w.written, index, w.write));
                 }
-                again.sort_unstable_by(|a, b| b.2.cmp(&a.2));
-                fresh.sort_unstable_by(|a, b| b.2.cmp(&a.2));
+                again.sort_unstable_by_key(|a| std::cmp::Reverse(a.2));
+                fresh.sort_unstable_by_key(|a| std::cmp::Reverse(a.2));
                 let mut before: Vec<(u32, u64)> = again.iter().map(|&(_, i, w)| (i, w)).collect();
                 let (mut new, mut old) = (0, fresh.len());
                 while new < old && before.len() < max {
