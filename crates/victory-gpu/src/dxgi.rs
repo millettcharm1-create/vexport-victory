@@ -255,8 +255,25 @@ fn display_size() -> (u32, u32) {
     })
 }
 
-/// The console's mode list: one 4K mode at 60 Hz (the title looks
-/// for a 120 Hz one to allow 120 Hz frame intervals).
+/// The refresh rate of the display the console reports, in Hz:
+/// `VICTORY_DISPLAY_HZ` (30 to 240), else 60. The title looks for a 120 Hz
+/// mode before it allows frame intervals shorter than a 60th of a second;
+/// with 60 it sets one of a 30th (33.3 ms: "frame interval" in the log) and
+/// plays at 30 frames a second at most. shortcut: whether it then plays at
+/// 60 and its simulation keeps time is not yet seen (2026-11-27).
+fn display_hz() -> u32 {
+    static HZ: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *HZ.get_or_init(|| {
+        let hz = std::env::var("VICTORY_DISPLAY_HZ")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .map_or(60, |hz| hz.clamp(30, 240));
+        tracing::info!(hz, "display refresh rate reported to the title (VICTORY_DISPLAY_HZ)");
+        hz
+    })
+}
+
+/// The console's mode list: one 4K mode at [`display_hz`].
 /// shortcut: fixed mode, not the host display's; report the host's rates if
 /// a title paces by them.
 extern "system" fn modes(
@@ -282,7 +299,7 @@ extern "system" fn modes(
     let mode = Mode {
         width,
         height,
-        refresh: [60, 1],
+        refresh: [display_hz(), 1],
         format: 0,
         scanlines: 1, // progressive
         scaling: 0,

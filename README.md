@@ -82,6 +82,10 @@ picked ("the processor's preset", "this PC, and the tier").
   of RAM or less. The game is told the display is 1280x720 instead of 4K, so it
   may draw fewer pixels (not tested yet: the log's "depth texture" lines show
   the size it renders at). `VICTORY_TIER=standard` or `=low` picks one yourself.
+- **Frame rate (experiment)**: the game sets itself to 30 fps on a 60 Hz display.
+  `VICTORY_DISPLAY_HZ=120` reports a 120 Hz display, which the game looks for
+  before it allows faster frame intervals. Not tested yet: the log's "frame
+  interval" line says what the game chose (33.3 ms is 30 fps, 16.7 ms is 60).
 - **Texture detail by card**: full on 16 GB cards; large textures at half detail
   on 12 GB cards; most textures at half detail on 8 GB cards.
 
