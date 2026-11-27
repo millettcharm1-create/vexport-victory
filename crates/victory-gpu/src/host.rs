@@ -8940,14 +8940,6 @@ impl Meter {
                 slow[1] as f64 / 1e3 / frames,
                 slow[2] as f64 / 1e3
             );
-            if let Some([let_go, under, again]) = crate::watch::unlocked_runs() {
-                tracing::info!(
-                    "guards made read-only per frame (VICTORY_GUARD_UNLOCKED=1): {:.1} runs with the lock let go, {:.1} under it all the same, {:.1} done again as before",
-                    let_go as f64 / frames,
-                    under as f64 / frames,
-                    again as f64 / frames
-                );
-            }
             if crate::shadow::cards() {
                 let per_frame = |i: usize| card[i] as f64 / frames;
                 tracing::info!(

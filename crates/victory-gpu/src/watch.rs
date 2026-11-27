@@ -1036,7 +1036,7 @@ pub(crate) fn nothing_put(block: usize) -> bool {
 
 /// The title is about to write block by block around `at`: as by a fault.
 pub(crate) fn opened_for_writing(at: usize) {
-    let mut g = guards_settled();
+    let mut g = guards();
     if open(&mut g, at, at + 1) != 0 {
         g.opened(at / BLOCK);
     }
@@ -1699,19 +1699,16 @@ fn guard(start: usize, end: usize) -> Option<Vec<usize>> {
         written.extend(BitsOf(!known & in_word(word * 64, first, last)).map(|bit| word * 64 + bit));
     }
     let mut run: Option<(usize, usize)> = None;
-    // Runs protected with the lock let go, at the end ([`unlocked`]).
-    let mut plans: Vec<Planned> = Vec::new();
     for &block in &written {
         if let Some((from, to)) = run
             && to != block
         {
+            protect(&mut g, from, to);
             run = None;
-            if !plan_protect(&mut g, from, to, &mut plans) {
-                // Faults of the title's wait for the lock: each block is done
-                // on its own, and looked at anew below.
-                drop(g);
-                g = guards_timed();
-            }
+            // Faults of the title's wait for the lock: each block is done on
+            // its own, and looked at anew below.
+            drop(g);
+            g = guards_timed();
         }
         // Told as written by this, and read by the caller after.
         if BESIDE.take(block) {
@@ -1722,7 +1719,7 @@ fn guard(start: usize, end: usize) -> Option<Vec<usize>> {
             // because one could not be made so. (Or clean, and bytes were put
             // in beside the guard: it stays.)
             if let Some((from, to)) = run.take() {
-                plan_protect(&mut g, from, to, &mut plans);
+                protect(&mut g, from, to);
             }
             if g.clean.contains(block) {
                 continue;
@@ -1730,25 +1727,16 @@ fn guard(start: usize, end: usize) -> Option<Vec<usize>> {
             if cover(&mut g, block, block + 1) {
                 g.clean.insert(block);
             }
-        } else if !g.foreign.contains(&block)
-            && !g.left_alone(block)
-            && !g.rests(block, rest)
-            // (Another refresh's, as another view of its page.)
-            && !(unlocked() && MOVING.any(block, block + 1))
-        {
+        } else if !g.foreign.contains(&block) && !g.left_alone(block) && !g.rests(block, rest) {
             run = Some((run.map_or(block, |r| r.0), block + 1));
         } else if let Some((from, to)) = run.take() {
-            plan_protect(&mut g, from, to, &mut plans);
+            protect(&mut g, from, to);
         }
     }
     if let Some((from, to)) = run {
-        plan_protect(&mut g, from, to, &mut plans);
+        protect(&mut g, from, to);
     }
     drop(g);
-    if !plans.is_empty() {
-        make_planned(&mut plans);
-        note_planned(&mut guards_timed(), plans);
-    }
     #[cfg(feature = "diagnostics")]
     crate::faultbook::note(crate::faultbook::What::Asked, first, last, written.len() as u64);
     Some(written)
@@ -1796,247 +1784,6 @@ fn is_view(start: usize, end: usize) -> bool {
         }
         at = next;
     }
-}
-
-/// Whether the read-only protection a refresh gives the blocks it takes is
-/// made with the guards' lock let go (`VICTORY_GUARD_UNLOCKED=1`; off by
-/// default, read once).
-///
-/// In a crowded street (RTX 5070 Ti, ~20 fps) the threads that wait for the
-/// guards' lock waited 280 ms a second in the title's write faults, 150 in
-/// the four refresh helpers and 55 in the submitting thread, while it was
-/// held some 65 ms a second for changes of protection, most of them the
-/// refreshes' (`protect_here`, `protect_alias`; profile of run
-/// play-20261127-131521). With the switch [`guard`] notes under the lock
-/// what it will protect (the blocks' bits in [`PROTECTED`] and [`MOVING`]),
-/// lets the lock go, changes the protections, and notes the blocks guarded
-/// and clean under the lock again, as it did before, only then letting go
-/// of their [`MOVING`] bits. What did not go as planned is done as before,
-/// under the lock.
-///
-/// Nobody else changes the protection of a block, nor relies on its being
-/// what is noted, while a change is in flight: whoever would ([`open`] and
-/// what maps, unmaps or writes title memory) takes the lock by
-/// [`guards_settled`], which waits with the lock let go until none is in
-/// flight; the title's write fault waits for its block and the other views
-/// of its page only ([`moving_near`]). The thread making the change never
-/// waits for anything but the lock, so none of these waits can close a
-/// circle.
-fn unlocked() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| crate::switch::on("VICTORY_GUARD_UNLOCKED"))
-}
-
-/// With [`unlocked`]: the blocks whose protection a refresh is changing with
-/// the lock let go. Set and cleared under the guards' lock.
-static MOVING: Bits = Bits::new();
-
-/// With [`unlocked`]: the refreshes with changes in flight, and the threads
-/// waiting for none to be ([`guards_settled`]): while one waits, a refresh
-/// changes protections under the lock, as before, so the wait ends.
-static MOVERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-static SETTLING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// With [`unlocked`], since they were last taken ([`unlocked_runs`]): runs
-/// protected with the lock let go, runs protected under it all the same (one
-/// waited, or another view of theirs was being changed), runs whose
-/// protection could not be made whole that way and were done as before.
-static UNLOCKED_RUNS: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
-
-/// [`UNLOCKED_RUNS`], taken; `None` without the switch.
-pub(crate) fn unlocked_runs() -> Option<[u64; 3]> {
-    unlocked().then(|| [0, 1, 2].map(|i| UNLOCKED_RUNS[i].swap(0, std::sync::atomic::Ordering::Relaxed)))
-}
-
-/// Waits awake, then yielding, until `done`.
-fn spin_until(done: impl Fn() -> bool) {
-    let mut spins = 0u32;
-    while !done() {
-        if spins < 64 {
-            std::hint::spin_loop();
-            spins += 1;
-        } else {
-            std::thread::yield_now();
-        }
-    }
-}
-
-/// The guards' lock, with no change of protection in flight
-/// ([`unlocked`]): for what changes protections or relies on them being as
-/// noted. Without the switch, [`guards`].
-fn guards_settled() -> std::sync::MutexGuard<'static, Guards> {
-    use std::sync::atomic::Ordering::SeqCst;
-    if !unlocked() {
-        return guards();
-    }
-    let mut waiting = false;
-    loop {
-        let g = guards();
-        // (None begins while the lock is held.)
-        if MOVERS.load(SeqCst) == 0 {
-            if waiting {
-                SETTLING.fetch_sub(1, SeqCst);
-            }
-            return g;
-        }
-        if !waiting {
-            SETTLING.fetch_add(1, SeqCst);
-            waiting = true;
-        }
-        drop(g);
-        spin_until(|| MOVERS.load(SeqCst) == 0);
-    }
-}
-
-/// Whether the protection of `block`, or of another view of its page, is
-/// being changed with the lock let go ([`unlocked`]).
-fn moving_near(block: usize) -> bool {
-    MOVERS.load(std::sync::atomic::Ordering::SeqCst) != 0
-        && (MOVING.any(block, block + 1)
-            || crate::inplace::pages_of(block * BLOCK).into_iter().any(|page| MOVING.any(page / BLOCK, page / BLOCK + 1)))
-}
-
-/// A run of blocks [`guard`] protects with the lock let go ([`unlocked`]):
-/// the run, the other views of its pages to protect with it (the block of
-/// the run, the other view's block), and the blocks of the run one of whose
-/// other views cannot be (not clean, as [`cover`] has it). Then whether the
-/// run's protection was made, and each other view's.
-struct Planned {
-    from: usize,
-    to: usize,
-    others: Vec<(usize, usize)>,
-    uncovered: Vec<usize>,
-    done: bool,
-    others_done: Vec<bool>,
-}
-
-/// With [`unlocked`], under the lock: [`protect`] of `[from, to)` planned,
-/// to be made by [`make_planned`] and noted by [`note_planned`]; or, if it
-/// cannot be, made now as before. Whether it was planned.
-fn plan_protect(g: &mut Guards, from: usize, to: usize, plans: &mut Vec<Planned>) -> bool {
-    use std::sync::atomic::Ordering::SeqCst;
-    if !unlocked() || SETTLING.load(SeqCst) != 0 || MOVING.any(from, to) {
-        if unlocked() {
-            UNLOCKED_RUNS[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-        protect(g, from, to);
-        return false;
-    }
-    UNLOCKED_RUNS[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    #[cfg(feature = "diagnostics")]
-    crate::faultbook::note(crate::faultbook::What::Taken, from, to, 0);
-    // Ahead of the protection, as before (`PROTECTED`).
-    for block in from..to {
-        PROTECTED.set(block);
-        MOVING.set(block);
-    }
-    let mut plan = Planned { from, to, others: Vec::new(), uncovered: Vec::new(), done: false, others_done: Vec::new() };
-    // As `cover` would, the run's blocks counted guarded.
-    for (page, others) in elsewhere(from * BLOCK, (to - from) * BLOCK) {
-        let block = page / BLOCK;
-        if !(from..to).contains(&block) {
-            continue;
-        }
-        #[cfg(feature = "diagnostics")]
-        ALIASES[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        g.aliased.insert(block);
-        let mut covered = true;
-        for other in others {
-            let other = other / BLOCK;
-            g.aliased.insert(other);
-            if g.protected.contains(other) || (from..to).contains(&other) || plan.others.iter().any(|&(_, o)| o == other) {
-                continue;
-            }
-            if g.left_alone(other) || g.rests(other, rest()) || MOVING.any(other, other + 1) {
-                covered = false;
-                continue;
-            }
-            PROTECTED.set(other);
-            MOVING.set(other);
-            plan.others.push((block, other));
-        }
-        if !covered {
-            plan.uncovered.push(block);
-        }
-    }
-    if plans.is_empty() {
-        MOVERS.fetch_add(1, SeqCst);
-    }
-    plans.push(plan);
-    true
-}
-
-/// With the lock let go: the protections of `plans` made. Of a run that
-/// cannot be made whole none of its other views is: [`note_planned`] does
-/// it as before.
-fn make_planned(plans: &mut [Planned]) {
-    use windows_sys::Win32::System::Memory::{PAGE_READONLY, PAGE_READWRITE, VirtualProtect};
-    let set = |from: usize, to: usize| {
-        let mut old = 0;
-        #[cfg(feature = "diagnostics")]
-        let started = std::time::Instant::now();
-        // SAFETY: title view memory; only its protection changes, and nobody
-        // else changes it meanwhile (`MOVING`).
-        let mut done = unsafe { VirtualProtect((from * BLOCK) as *const _, (to - from) * BLOCK, PAGE_READONLY, &mut old) != 0 };
-        if done && !matches!(old, PAGE_READWRITE | PAGE_READONLY) {
-            // Not for us to guard: as it was.
-            // SAFETY: as above.
-            unsafe { VirtualProtect((from * BLOCK) as *const _, (to - from) * BLOCK, old, &mut old) };
-            done = false;
-        }
-        #[cfg(feature = "diagnostics")]
-        {
-            tally(5, (to - from) as u64);
-            tally(8, started.elapsed().as_nanos() as u64);
-        }
-        done
-    };
-    for plan in plans {
-        plan.done = set(plan.from, plan.to);
-        plan.others_done = plan.others.iter().map(|&(_, other)| plan.done && set(other, other + 1)).collect();
-    }
-}
-
-/// Under the lock again: what [`make_planned`] made is noted, as
-/// [`protect`] notes it; what it could not make is done as before. Then the
-/// blocks are no longer [`MOVING`].
-fn note_planned(g: &mut Guards, plans: Vec<Planned>) {
-    use std::sync::atomic::Ordering::SeqCst;
-    if plans.is_empty() {
-        return;
-    }
-    for plan in plans {
-        let moved = (plan.from..plan.to).chain(plan.others.iter().map(|o| o.1));
-        if plan.done {
-            g.protected.insert_all(plan.from..plan.to);
-            g.clean.insert_all(plan.from..plan.to);
-            for (&(block, other), &done) in plan.others.iter().zip(&plan.others_done) {
-                if done {
-                    g.protected.insert(other);
-                    #[cfg(feature = "diagnostics")]
-                    crate::faultbook::note(crate::faultbook::What::Alias, other, 0, 0);
-                } else {
-                    PROTECTED.clear(other);
-                    g.clean.remove(block);
-                }
-            }
-            for &block in &plan.uncovered {
-                g.clean.remove(block);
-            }
-            moved.for_each(|block| MOVING.clear(block));
-        } else {
-            for &(_, other) in &plan.others {
-                PROTECTED.clear(other);
-            }
-            for block in moved {
-                MOVING.clear(block);
-            }
-            UNLOCKED_RUNS[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            // (Block by block, and the other views, as before.)
-            protect(g, plan.from, plan.to);
-        }
-    }
-    MOVERS.fetch_sub(1, SeqCst);
 }
 
 /// Makes blocks `[from, to)` read-only and notes them guarded and clean;
@@ -2107,9 +1854,7 @@ fn protect_alias(g: &mut Guards, block: usize) -> bool {
     if g.protected.contains(block) {
         return true;
     }
-    // (Or another refresh is making it so with the lock let go, `unlocked`,
-    // and notes it when that is done.)
-    if g.left_alone(block) || g.rests(block, rest()) || (unlocked() && MOVING.any(block, block + 1)) {
+    if g.left_alone(block) || g.rests(block, rest()) {
         return false;
     }
     // Ahead of the protection.
@@ -2296,7 +2041,7 @@ pub fn writing(at: usize, len: usize) {
     // The length is the title's (`fread`'s size times count, saturated).
     let last = at.saturating_add(len).div_ceil(BLOCK);
     if !light() || PROTECTED.any(at / BLOCK, last) {
-        let mut g = guards_settled();
+        let mut g = guards_timed();
         let opened = open(&mut g, at, at.saturating_add(len));
         #[cfg(feature = "diagnostics")]
         {
@@ -2322,7 +2067,7 @@ pub struct KernelWrite(usize, usize);
 pub fn kernel_writing(at: usize, len: usize) -> KernelWrite {
     let (first, last) = (at / BLOCK, at.saturating_add(len).div_ceil(BLOCK));
     {
-        let mut g = guards_settled();
+        let mut g = guards_timed();
         open(&mut g, at, at.saturating_add(len));
         if len != 0 {
             // Nothing known of them stands while they are left alone.
@@ -2415,7 +2160,7 @@ pub fn title_memory_written(at: usize, len: usize, pages: bool) {
         }
     }
     {
-        let mut g = guards_settled();
+        let mut g = guards();
         let guarded = g.protected.range(at / BLOCK..end.div_ceil(BLOCK)).count() as u64;
         if pages {
             WRITTEN[2].fetch_add(guarded, Relaxed);
@@ -2447,7 +2192,7 @@ pub(crate) fn views_mapped(section: usize, offset: u64, len: usize) {
     // since that look, relying on those that are opened here. And all
     // together: none may be writable while another is clean (who asks about
     // that one by its bits takes no lock).
-    let mut g = guards_settled();
+    let mut g = guards();
     let blocks: Vec<usize> =
         ranges.iter().flat_map(|&(at, n)| g.protected.range(at / BLOCK..(at + n).div_ceil(BLOCK)).collect::<Vec<_>>()).collect();
     #[cfg(feature = "diagnostics")]
@@ -2465,7 +2210,7 @@ pub fn title_memory_splitting(at: usize, len: usize) {
     if others.is_empty() {
         return;
     }
-    let mut g = guards_settled();
+    let mut g = guards();
     // (The view itself too: the part that stays is read-only until then. And
     // all of them told as written before the first is writable.)
     for &other in &others {
@@ -2602,7 +2347,7 @@ fn came_back(at: usize, write: bool) -> bool {
             return readable_view(at);
         }
         // (A refresh may have guarded the page that came back.)
-        open(&mut guards_settled(), at, at + 1) != 0 || writable(at)
+        open(&mut guards(), at, at + 1) != 0 || writable(at)
     };
     let before = changes();
     if there() || again_after_change(before, there) {
@@ -2729,7 +2474,7 @@ pub fn title_memory_unmapping(at: usize, len: usize) {
 /// was noted of its blocks (guarded, clean, absent) would be taken for true
 /// of the next memory at the address.
 pub fn title_memory_freed(at: usize, len: usize) {
-    let mut g = guards_settled();
+    let mut g = guards();
     let first = at / BLOCK;
     let noted = [g.protected.range(first..).next(), g.absent.range(first..).next(), g.foreign.range(first..).next().copied()];
     let Some(noted) = noted.into_iter().flatten().min() else {
@@ -2789,7 +2534,7 @@ fn title_memory_changed(at: usize, len: usize) -> std::sync::MutexGuard<'static,
     crate::inplace::views_gone(at, len);
     // And nothing stays in place over it.
     crate::inplace::title_memory_freeing(at, len);
-    let mut g = guards_settled();
+    let mut g = guards();
     let range = at / BLOCK..at.saturating_add(len).div_ceil(BLOCK);
     let absent: Vec<usize> = g.absent.range(range.clone()).collect();
     for block in absent {
@@ -2862,31 +2607,17 @@ pub(crate) fn install() {
         // (then nothing waits for the lock), and a copy may have guarded it
         // again since that (then it is ours again, not read-only for some
         // other reason).
-        let mut tries = 0;
-        while tries < 3 {
+        for _ in 0..3 {
             if !PROTECTED.any(block, block + 1) && writable(at) {
                 #[cfg(feature = "diagnostics")]
                 crate::faultbook::note(crate::faultbook::What::Open, block, 0, 0);
                 return EXCEPTION_CONTINUE_EXECUTION;
             }
-            // A refresh is making the block, or another view of its page,
-            // read-only with the lock let go (`unlocked`): it is noted
-            // guarded when that is done, and opened then.
-            if unlocked() && moving_near(block) {
-                spin_until(|| !moving_near(block));
-                continue;
-            }
-            tries += 1;
             #[cfg(feature = "diagnostics")]
             let began = std::time::Instant::now();
             // (Let go again before the next look: the runtime wants the
             // guards to end a change.)
             let mut g = guards();
-            if unlocked() && moving_near(block) {
-                drop(g);
-                tries -= 1;
-                continue;
-            }
             #[cfg(feature = "diagnostics")]
             let waited = began.elapsed();
             let opened = open(&mut g, at, at + 1);
@@ -4268,20 +3999,6 @@ mod many_askers_tests {
     #[test]
     fn no_write_through_another_view_is_lost_between_askers() {
         writes_to_views_are_not_lost::<3>(0);
-    }
-
-    /// With `VICTORY_GUARD_UNLOCKED=1` (run the module's tests so, too): the
-    /// same, and the protections were made with the lock let go.
-    #[test]
-    fn no_write_is_lost_while_protections_are_made_with_the_lock_let_go() {
-        if !super::unlocked() {
-            return;
-        }
-        writes_to_views_are_not_lost::<3>(0);
-        writes_to_views_are_not_lost::<1>(50);
-        let runs = super::UNLOCKED_RUNS[0].load(std::sync::atomic::Ordering::Relaxed);
-        assert!(runs > 0, "no run was protected with the lock let go");
-        assert_eq!(super::MOVERS.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     fn writes_to_views_are_not_lost<const VIEWS: usize>(rest: u64) {
