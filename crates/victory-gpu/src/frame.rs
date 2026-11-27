@@ -45,11 +45,38 @@ fn clock() -> std::sync::MutexGuard<'static, Option<Clock>> {
 /// display (2026-11-27); its frames begin on our clock's ticks, so a shorter
 /// tick lets it begin them sooner. shortcut: if the title's simulation
 /// counts frames instead of time, its world runs that much faster.
+/// `VICTORY_FPS=auto`: the refresh rate of the PC's display ([`display_hz`]),
+/// 60 if it cannot be read: as many frames as the screen shows, where the
+/// PC keeps up.
 fn fps_asked() -> Option<u32> {
     static FPS: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
     *FPS.get_or_init(|| {
-        std::env::var("VICTORY_FPS").ok().and_then(|v| v.trim().parse::<u32>().ok()).map(|n| n.clamp(30, 240))
+        let asked = std::env::var("VICTORY_FPS").ok()?;
+        let fps = if asked.trim().eq_ignore_ascii_case("auto") {
+            display_hz().unwrap_or(60)
+        } else {
+            asked.trim().parse::<u32>().ok()?
+        }
+        .clamp(30, 240);
+        tracing::info!(fps, asked = asked.trim(), "frames a second at most (VICTORY_FPS)");
+        Some(fps)
     })
+}
+
+/// The refresh rate of the PC's main display, from its current mode.
+#[cfg(windows)]
+fn display_hz() -> Option<u32> {
+    use windows::Win32::Graphics::Gdi::{DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW};
+    let mut mode = DEVMODEW { dmSize: size_of::<DEVMODEW>() as u16, ..Default::default() };
+    // SAFETY: the current mode of the main display, into a sized structure.
+    let ok = unsafe { EnumDisplaySettingsW(windows::core::PCWSTR::null(), ENUM_CURRENT_SETTINGS, &mut mode) };
+    // (1 and 0 are the display's own default rate.)
+    (ok.as_bool() && mode.dmDisplayFrequency > 1).then_some(mode.dmDisplayFrequency)
+}
+
+#[cfg(not(windows))]
+fn display_hz() -> Option<u32> {
+    None
 }
 
 /// The interval our clock ticks at for an `asked` one and [`fps_asked`].

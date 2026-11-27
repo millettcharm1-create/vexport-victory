@@ -1078,6 +1078,102 @@ pub(crate) fn lift_thread() {
 
 /// Maps `n` pages at `address`, in place of what is mapped there; null
 /// `pages` unmaps. Returns `address`, or null if a page or the host fails.
+/// What the title asks of the page mappings, by path, counted always and
+/// said in the log every 5 seconds: requests, pages, the system's views
+/// they make (one per page on the paths that map page by page), the views
+/// they would make if neighbouring pages of one section were one view, and
+/// the time on the calling thread. In a crowded street the title's main
+/// thread spent a quarter of its time in these calls (a profile on an RTX
+/// 5070 Ti, 2026-11-27): whether joining neighbours would make fewer calls
+/// is what these say.
+mod tally {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+    /// The paths: `XMemMapPhysicalPages`, `XMemMapPhysicalPagesScatter`, the
+    /// GPU's page-mapping copies ([`super::map_alias`]).
+    pub(super) const PATHS: [&str; 3] = ["map", "scatter", "gpu copies"];
+    /// Per path: requests, pages, views made, views if joined, nanoseconds.
+    static COUNTS: [[AtomicU64; 5]; 3] = [const { [const { AtomicU64::new(0) }; 5] }; 3];
+    /// When the line was last said, in milliseconds from the first count.
+    static SAID: AtomicU64 = AtomicU64::new(0);
+
+    pub(super) fn note(path: usize, pages: usize, views: usize, joined: usize, started: std::time::Instant) {
+        let c = &COUNTS[path];
+        c[0].fetch_add(1, Relaxed);
+        c[1].fetch_add(pages as u64, Relaxed);
+        c[2].fetch_add(views as u64, Relaxed);
+        c[3].fetch_add(joined as u64, Relaxed);
+        c[4].fetch_add(started.elapsed().as_nanos() as u64, Relaxed);
+        say();
+    }
+
+    fn say() {
+        static FIRST: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        let now = FIRST.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64;
+        let last = SAID.load(Relaxed);
+        if now < last + 5000 || SAID.compare_exchange(last, now, Relaxed, Relaxed).is_err() {
+            return;
+        }
+        let seconds = ((now - last).max(1) as f64) / 1000.0;
+        let mut line = String::new();
+        for (path, name) in PATHS.iter().enumerate() {
+            let [requests, pages, views, joined, ns] = std::array::from_fn::<u64, 5, _>(|k| COUNTS[path][k].swap(0, Relaxed));
+            if requests == 0 {
+                continue;
+            }
+            use std::fmt::Write;
+            let _ = write!(
+                line,
+                "{name}: {:.0} requests, {:.0} pages, {:.0} views made, {:.0} if neighbours were joined, {:.1} ms; ",
+                requests as f64 / seconds,
+                pages as f64 / seconds,
+                views as f64 / seconds,
+                joined as f64 / seconds,
+                ns as f64 / 1e6 / seconds
+            );
+        }
+        if !line.is_empty() {
+            tracing::info!("page mappings per second (VICTORY page tally): {line}");
+        }
+    }
+
+    /// Of `pages` (address, section, index; section 0: an unmapping), the
+    /// runs a joined view would cover: neighbouring addresses showing
+    /// neighbouring slices of one section, or unmapped side by side.
+    pub(super) fn runs(pages: impl Iterator<Item = (usize, usize, usize)>) -> usize {
+        let mut runs = 0;
+        let mut last: Option<(usize, usize, usize)> = None;
+        for (at, section, index) in pages {
+            let joins = last.is_some_and(|(a, s, i)| {
+                at == a + super::PAGE && section == s && (section == 0 || index == i + 1)
+            });
+            if !joins {
+                runs += 1;
+            }
+            last = Some((at, section, index));
+        }
+        runs
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::runs;
+        use crate::modules::xmem::PAGE;
+
+        #[test]
+        fn neighbouring_pages_of_one_section_make_one_run() {
+            let p = |k: usize| k * PAGE;
+            // Three neighbours, then a gap, then another section.
+            assert_eq!(runs([(p(1), 7, 4), (p(2), 7, 5), (p(3), 7, 6), (p(5), 7, 7), (p(6), 8, 8)].into_iter()), 3);
+            // Unmappings side by side.
+            assert_eq!(runs([(p(1), 0, 0), (p(2), 0, 0), (p(4), 0, 0)].into_iter()), 2);
+            // Slices out of order.
+            assert_eq!(runs([(p(1), 7, 4), (p(2), 7, 9)].into_iter()), 2);
+            assert_eq!(runs(std::iter::empty()), 0);
+        }
+    }
+}
+
 pub extern "system" fn XMemMapPhysicalPages(
     address: *mut c_void,
     n: usize,
@@ -1088,6 +1184,9 @@ pub extern "system" fn XMemMapPhysicalPages(
     // the mapping call that holds them.
     // SAFETY: the title passes `n` page numbers, or null.
     let pages = (!pages.is_null()).then(|| unsafe { std::slice::from_raw_parts(pages, n) }.to_vec());
+    let started = std::time::Instant::now();
+    let views = std::cell::Cell::new(0usize);
+    let _tally = Defer(|| tally::note(0, n, views.get(), views.get(), started));
     let mut costed = Costed::begin(Some(n));
     let _called = victory_gpu::timeline::span("the title's XMemMapPhysicalPages");
     let _busy = Busy::begin();
@@ -1127,6 +1226,7 @@ pub extern "system" fn XMemMapPhysicalPages(
         if !map(&mut physical, base + i * PAGE, run * PAGE, first) {
             return std::ptr::null_mut();
         }
+        views.set(views.get() + 1);
         i += run;
     }
     address
@@ -1142,6 +1242,14 @@ pub extern "system" fn XMemMapPhysicalPagesScatter(
     if addresses.is_null() {
         return 0;
     }
+    let started = std::time::Instant::now();
+    // (Neighbouring page numbers are taken for neighbouring slices.)
+    let joined = tally::runs((0..n).map(|i| {
+        // SAFETY: the title passes `n` addresses and, unless null, `n` pages.
+        let (at, page) = unsafe { (*addresses.add(i) as usize, if pages.is_null() { 0 } else { *pages.add(i) }) };
+        (at, usize::from(page != 0), page)
+    }));
+    let _tally = Defer(|| tally::note(1, n, n, joined, started));
     lift_thread();
     if side_by_side() > 1 && n > 1 {
         // Read before any lock is taken, as in `XMemMapPhysicalPages`.
@@ -1179,6 +1287,13 @@ pub extern "system" fn XMemMapPhysicalPagesScatter(
 /// heap. Page by page; false if a source page is not mapped physical memory.
 pub fn map_alias(to: u64, from: u64, len: u64) -> bool {
     let (to, from, len) = (to as usize, from as usize, len as usize);
+    let started = std::time::Instant::now();
+    let pages = len.div_ceil(PAGE);
+    let seen: std::cell::RefCell<Vec<(usize, usize, usize)>> = std::cell::RefCell::new(Vec::new());
+    let _tally = Defer(|| {
+        let joined = if from == 0 { usize::from(pages > 0) } else { tally::runs(seen.borrow().iter().copied()) };
+        tally::note(2, pages, pages, joined, started)
+    });
     let _costed = Costed::begin(None);
     let _busy = Busy::begin();
     let mut physical = physical();
@@ -1193,6 +1308,7 @@ pub fn map_alias(to: u64, from: u64, len: u64) -> bool {
         let Some(slice) = physical.slice_at(at) else {
             return false;
         };
+        seen.borrow_mut().push((to + k, Arc::as_ptr(&slice.section) as usize, slice.index));
         if !map(&mut physical, to + k, PAGE, slice) {
             return false;
         }
@@ -1282,6 +1398,15 @@ fn scatter(wanted: &[(usize, usize)]) -> bool {
 
 /// Pages changed under the locks at once.
 const GROUP: usize = 64;
+
+/// Runs its closure when dropped (the tally of a call, on every return).
+struct Defer<F: FnMut()>(F);
+
+impl<F: FnMut()> Drop for Defer<F> {
+    fn drop(&mut self) {
+        (self.0)();
+    }
+}
 
 /// How many threads map a group of pages side by side (`VICTORY_MAP_THREADS`;
 /// 8 unless set; 1: the caller alone, a page after the other; `auto`: 1 while

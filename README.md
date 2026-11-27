@@ -90,7 +90,9 @@ picked ("the processor's preset", "this PC, and the tier").
   starts it as a Series X instead (more memory, more pixels): that one chose 30 fps
   too. `VICTORY_FPS=60` makes the layer's frame clock tick every 16.7 ms whatever
   the game asks for. The world keeps its normal speed with it, so the launcher
-  sets 60 (`VICTORY_FPS=30` before the launcher gives the game's own 30 fps).
+  sets `VICTORY_FPS=auto`: up to your monitor's refresh rate (144 Hz: 144 fps),
+  as far as the PC keeps up. `VICTORY_FPS=30` gives the game's own 30 fps, a
+  number sets that cap.
 - **Texture detail by card**: full on 16 GB cards; large textures at half detail
   on 12 GB cards; most textures at half detail on 8 GB cards.
 
