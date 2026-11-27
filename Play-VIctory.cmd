@@ -57,6 +57,10 @@ rem budget kept for render targets, 768 to 3,072 MB, and textures loaded until a
 rem budget is left), and says what it picked in the log ("fitted to this card"). Fixed values tuned on
 rem a 16 GB card filled a 12 GB one (2026-11-26). Set VICTORY_CARD_ROOM_FOR_TARGETS_MB or
 rem VICTORY_TEXTURE_ROOM_PERCENT before the launcher to choose yourself.
+rem The driver's background shader work off (2026-11-27): in a profiled minute in a crowded street its
+rem four "D3D Background Thread"s took 37 % of the processor time the game took in all, while the card
+rem was 22 % busy and the frames waited for the processor. VICTORY_D3D12_BACKGROUND=1: on, as before.
+if not defined VICTORY_D3D12_BACKGROUND set "VICTORY_D3D12_BACKGROUND=0"
 rem Frames up to 60 a second (2026-11-27): the title asks for a 30th of a second between frames as a
 rem Series S and as a Series X; our frame clock ticks every 60th instead (frame.rs `fps_asked`), and the
 rem world kept its speed. VICTORY_FPS=30: the title's own rate; another number for another cap.

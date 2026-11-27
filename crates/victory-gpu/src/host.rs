@@ -916,7 +916,11 @@ fn create() -> windows::core::Result<Host> {
         // 1,000-1,200 ms a frame, and 830-950 ms from the moment they
         // stopped (run 54, 08:32:01 to 08:32:06). Left as it is by default:
         // whether the card is slower with the shaders it then keeps is not
-        // known.
+        // known. The launcher switches it off: in a profiled minute of play
+        // in a crowded street (RTX 5070 Ti, 16 threads, 2026-11-27) the four
+        // threads took 180 s of processor time, 37 % of all the process
+        // took, while the card was some 22 % busy and the frames waited for
+        // the processor (5 to 32 a second).
         if std::env::var_os("VICTORY_D3D12_BACKGROUND").is_some_and(|v| v == "0")
             && let Ok(device6) = device.cast::<ID3D12Device6>()
         {
