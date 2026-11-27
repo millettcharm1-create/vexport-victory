@@ -9,7 +9,9 @@ if not exist "%VICTORY_GAME_DIR%\game_scarlett_master.exe" (
   echo Set VICTORY_GAME_DIR to your own dump folder containing game_scarlett_master.exe. 1>&2
   exit /b 2
 )
-set "runner=%~dp0victory-3d-rtx-pareto-residency.exe"
+rem VICTORY_RUNNER=<exe>: another build of ours, such as target\diag\victory.exe (the profiler).
+set "runner=%VICTORY_RUNNER%"
+if not defined runner set "runner=%~dp0victory-3d-rtx-pareto-residency.exe"
 if not exist "%runner%" set "runner=%~dp0target\release\victory.exe"
 if not exist "%runner%" (
   echo Extract the Windows release or run cargo build --release --locked -p victory. 1>&2
@@ -55,6 +57,10 @@ rem budget kept for render targets, 768 to 3,072 MB, and textures loaded until a
 rem budget is left), and says what it picked in the log ("fitted to this card"). Fixed values tuned on
 rem a 16 GB card filled a 12 GB one (2026-11-26). Set VICTORY_CARD_ROOM_FOR_TARGETS_MB or
 rem VICTORY_TEXTURE_ROOM_PERCENT before the launcher to choose yourself.
+rem Frames up to 60 a second (2026-11-27): the title asks for a 30th of a second between frames as a
+rem Series S and as a Series X; our frame clock ticks every 60th instead (frame.rs `fps_asked`), and the
+rem world kept its speed. VICTORY_FPS=30: the title's own rate; another number for another cap.
+if not defined VICTORY_FPS set "VICTORY_FPS=60"
 rem The console the title is told it runs on (2026-11-27): series-s, as every measurement here was made,
 rem or series-x, which tells the title it has more memory (13.5 GB) and draws more pixels, to see whether
 rem it then allows 60 frames a second ("frame interval" in the log: 33.3 ms is 30, 16.7 ms is 60).
