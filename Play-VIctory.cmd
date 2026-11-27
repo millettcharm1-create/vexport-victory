@@ -65,6 +65,12 @@ rem The heaps' records looked for at the game's submit call (2026-11-27): in a c
 rem prepares submissions waited 2.9 ms a frame for them, 0.1 with this (fps 17.7 to 19.5, RTX 5070 Ti, no
 rem visual change seen). VICTORY_HEAP_SYNC_AT_CALL=0: when that thread comes to the submission, as before.
 if not defined VICTORY_HEAP_SYNC_AT_CALL set "VICTORY_HEAP_SYNC_AT_CALL=1"
+rem Keys for this game's pad layout (2026-11-27): the stand-in pad's keys were laid out for Grand Theft Auto
+rem V's buttons, so Shift jumped and Ctrl ran here. Shift runs (left stick's click), Space jumps (A), Ctrl
+rem does what Space did (X); tried by the user on foot. A key named here keeps that in vehicles too (Space
+rem is no handbrake). Set VICTORY_PAD_KEYS before the launcher for your own (README-fxceless), or to a
+rem single space for the keys as they were.
+if not defined VICTORY_PAD_KEYS set "VICTORY_PAD_KEYS=Shift=LS,Space=A,Ctrl=X"
 rem Frames up to 60 a second (2026-11-27): the title asks for a 30th of a second between frames as a
 rem Series S and as a Series X; our frame clock ticks every 60th instead (frame.rs `fps_asked`), and the
 rem world kept its speed. 240, the most the clock allows: frames as fast as the PC makes them up to
