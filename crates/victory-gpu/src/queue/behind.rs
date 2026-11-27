@@ -28,7 +28,10 @@
 //! - Write upload memory, descriptors, constants for later lists: those of
 //!   lists submitted are the card's to read until a fence behind them is
 //!   reached, on the console as here; no fence behind them is reached before
-//!   the lists have run ([`signal`] goes into the line behind them).
+//!   the lists have run ([`signal`] goes into the line behind them). (So the
+//!   descriptor records the title copied into its heaps as bytes may be
+//!   looked for as soon as the call is made: `VICTORY_HEAP_SYNC_AT_CALL`,
+//!   `crate::descriptor`.)
 //! - Signal, wait, present on the queue: in the line behind them.
 //! - Write a fence or a value in memory by the CPU: at once; our thread looks
 //!   at what it stands at again ([`wake`], and every millisecond).
@@ -638,6 +641,15 @@ fn number(name: &str) -> Option<usize> {
 thread_local! {
     /// This is the thread that does what is in the line.
     static OURS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// This is the thread that serves the line ([`Lane::serve`]), and not one
+    /// of those that only do work it waits for ([`no_drain_here`]).
+    static SERVING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether this is the thread that serves the line: what it prepares was put
+/// in the line by [`submit`], at the title's call.
+pub(super) fn serving() -> bool {
+    SERVING.get()
 }
 
 /// Whether submissions are prepared by a thread of ours
@@ -677,6 +689,7 @@ fn started() -> bool {
             unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL) };
             crate::cores::keep_on_fast_cores("victory-submit");
             OURS.set(true);
+            SERVING.set(true);
             let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| LANE.serve()));
             if ended.is_err() {
                 // Nothing would ever be sent again, and the title's thread
@@ -738,6 +751,7 @@ pub(super) fn submit(this: This, lists: &[This]) {
         if recordings.is_empty() {
             return;
         }
+        crate::descriptor::sync_heaps_at_call();
         let before = QUEUED.fetch_add(1, Relaxed);
         STATS[DEPTH].fetch_add(before, Relaxed);
         STATS[DEEPEST].fetch_max(before + 1, Relaxed);
@@ -746,6 +760,7 @@ pub(super) fn submit(this: This, lists: &[This]) {
         return;
     }
     let jobs = jobs_of(this, lists);
+    crate::descriptor::sync_heaps_at_call();
     let runs = jobs.iter().filter(|j| j.runs()).count() as u64;
     let before = QUEUED.fetch_add(runs, Relaxed);
     STATS[RUNS].fetch_add(runs, Relaxed);

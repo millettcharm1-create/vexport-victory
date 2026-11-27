@@ -454,6 +454,14 @@ pub(crate) fn line_moved() {
     behind::wake();
 }
 
+/// Whether this is the thread that serves the line ([`behind`]): every
+/// submission it prepares came in by the title's call to [`behind`]'s
+/// `submit`.
+#[cfg(windows)]
+pub(crate) fn serving_line() -> bool {
+    behind::serving()
+}
+
 /// This thread does work the line waits for: it does not wait for the line.
 #[cfg(windows)]
 pub(crate) fn no_drain_here() {

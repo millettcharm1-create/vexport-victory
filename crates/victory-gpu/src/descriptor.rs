@@ -197,14 +197,113 @@ fn sync_early() -> Option<std::time::Duration> {
     })
 }
 
-/// The thread's work: rounds asked for, rounds done.
+/// Whether the round of [`sync_heaps`] that a submission waits for is asked
+/// at the title's submit call, on the title's thread, and not when our
+/// submitting thread comes to the submission (`VICTORY_HEAP_SYNC_AT_CALL=1`,
+/// with [`sync_aside`] and the line of `crate::queue`'s `behind`; off by
+/// default, read once, not one of `VICTORY_AB`'s).
+///
+/// The submitting thread is the wall in crowded streets: 44-52 ms a frame
+/// on an RTX 5070 Ti at 20-24 fps, of it 4.7-7.2 ms waiting at the end of its
+/// preparing for the round it had asked at the start, the thread of the
+/// rounds being 14-17 ms a frame busy (some 300 changed heap pages and
+/// 12,000 records made a frame; play-20261127-123540). Everything a
+/// submission's lists read of the heap the title wrote before its call: what
+/// it writes after is for later lists (the slots of lists submitted are the
+/// card's until a fence behind them is reached, on the console as here). So
+/// a round begun after the call is as good as one begun later, and with the
+/// line some submissions deep it is mostly done before our thread gets
+/// there. A round covers every ask made before it began ([`SyncedHeaps`]
+/// waits for the newest asked at a call), so the asks of calls that come
+/// in a burst are one round, not one each.
+#[cfg(windows)]
+fn sync_at_call() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| sync_aside() && crate::switch::on("VICTORY_HEAP_SYNC_AT_CALL"))
+}
+
+/// The thread's work: rounds asked for, rounds done (a round done covers the
+/// asks made before it began).
 #[cfg(windows)]
 static SYNC_ROUNDS: (std::sync::Mutex<(u64, u64)>, std::sync::Condvar) = (std::sync::Mutex::new((0, 0)), std::sync::Condvar::new());
+
+/// With [`sync_at_call`]: the newest round asked at a title's submit call.
+#[cfg(windows)]
+static AT_CALL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Since the last frame line, with [`sync_at_call`]: rounds asked at calls,
+/// submissions that waited for one of those instead of asking, and rounds
+/// made for what was asked.
+#[cfg(windows)]
+static AT_CALL_COUNTS: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
 
 /// [`sync_heaps`], begun; done when it is dropped (with [`sync_aside`]), or
 /// when this returns.
 #[cfg(windows)]
 pub(crate) struct SyncedHeaps(Option<u64>);
+
+/// At the title's submit call into the line, with [`sync_at_call`]: a round
+/// is asked for the submission, before it is put in the line.
+#[cfg(windows)]
+pub(crate) fn sync_heaps_at_call() {
+    if !sync_at_call() || !sync_thread() {
+        return;
+    }
+    let mine = ask_round();
+    AT_CALL.fetch_max(mine, std::sync::atomic::Ordering::AcqRel);
+    AT_CALL_COUNTS[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Asks the thread for a round: its number.
+#[cfg(windows)]
+fn ask_round() -> u64 {
+    let mut rounds = SYNC_ROUNDS.0.lock().unwrap_or_else(|e| e.into_inner());
+    rounds.0 += 1;
+    let mine = rounds.0;
+    drop(rounds);
+    SYNC_ROUNDS.1.notify_all();
+    mine
+}
+
+/// The round a submission being prepared now waits for, if it was asked at
+/// its call: on the thread that serves the line every submission came in by
+/// a call that asked one, so the newest asked (`newest`) was asked at its
+/// own call or after it. Elsewhere, or before any call asked: none.
+#[cfg(windows)]
+fn round_of_call(at_call: bool, serving: bool, newest: u64) -> Option<u64> {
+    (at_call && serving && newest > 0).then_some(newest)
+}
+
+/// What a round that began when `asked` rounds had been asked and `done`
+/// were done leaves done: with asks made at calls, all of those asked
+/// (several may wait at once); else the one, as before.
+#[cfg(windows)]
+fn round_over(at_call: bool, asked: u64, done: u64) -> u64 {
+    if at_call { done.max(asked) } else { done + 1 }
+}
+
+#[cfg(all(test, windows))]
+mod at_call_tests {
+    use super::{round_of_call, round_over};
+
+    #[test]
+    fn a_submission_waits_for_the_round_of_its_call_only_on_the_thread_of_the_line() {
+        assert_eq!(round_of_call(true, true, 7), Some(7));
+        // Our thread before any call asked, another thread, the switch off.
+        assert_eq!(round_of_call(true, true, 0), None);
+        assert_eq!(round_of_call(true, false, 7), None);
+        assert_eq!(round_of_call(false, true, 7), None);
+    }
+
+    #[test]
+    fn a_round_covers_the_asks_made_before_it_began_and_one_as_before_without_the_switch() {
+        // Asks 3 to 6 waited while round 2 was made: one round for all.
+        assert_eq!(round_over(true, 6, 2), 6);
+        // Never back: a round that began with fewer asked than are done.
+        assert_eq!(round_over(true, 4, 6), 6);
+        assert_eq!(round_over(false, 6, 2), 3);
+    }
+}
 
 #[cfg(windows)]
 pub(crate) fn begin_sync_heaps() -> SyncedHeaps {
@@ -212,17 +311,36 @@ pub(crate) fn begin_sync_heaps() -> SyncedHeaps {
         sync_heaps();
         return SyncedHeaps(None);
     }
+    if !sync_thread() {
+        sync_heaps();
+        return SyncedHeaps(None);
+    }
+    let newest = AT_CALL.load(std::sync::atomic::Ordering::Acquire);
+    if let Some(round) = round_of_call(sync_at_call(), crate::queue::serving_line(), newest) {
+        AT_CALL_COUNTS[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return SyncedHeaps(Some(round));
+    }
+    SyncedHeaps(Some(ask_round()))
+}
+
+/// Starts the thread of the rounds, once: whether there is one.
+#[cfg(windows)]
+fn sync_thread() -> bool {
     static STARTED: std::sync::Once = std::sync::Once::new();
     static THREAD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     STARTED.call_once(|| {
         let made = std::thread::Builder::new().name("victory-heap-sync".into()).spawn(|| {
             crate::cores::keep_on_fast_cores("victory-heap-sync");
             let rounds = || SYNC_ROUNDS.0.lock().unwrap_or_else(|e| e.into_inner());
-            /// A round is over, however it ends.
-            struct Over;
+            /// A round is over, however it ends: the rounds asked when it
+            /// began.
+            struct Over(u64);
             impl Drop for Over {
                 fn drop(&mut self) {
-                    SYNC_ROUNDS.0.lock().unwrap_or_else(|e| e.into_inner()).1 += 1;
+                    let mut r = SYNC_ROUNDS.0.lock().unwrap_or_else(|e| e.into_inner());
+                    r.1 = round_over(sync_at_call(), self.0, r.1);
+                    drop(r);
+                    AT_CALL_COUNTS[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     SYNC_ROUNDS.1.notify_all();
                 }
             }
@@ -244,10 +362,11 @@ pub(crate) fn begin_sync_heaps() -> SyncedHeaps {
                         break;
                     }
                 }
+                let upto = r.0;
                 drop(r);
                 let _over = asked.then(|| {
                     last = std::time::Instant::now();
-                    Over
+                    Over(upto)
                 });
                 let _round =
                     crate::timeline::span(if asked { "the heaps' records, for a submission" } else { "the heaps' records, early" });
@@ -256,16 +375,7 @@ pub(crate) fn begin_sync_heaps() -> SyncedHeaps {
         });
         THREAD.store(made.is_ok(), std::sync::atomic::Ordering::Release);
     });
-    if !THREAD.load(std::sync::atomic::Ordering::Acquire) {
-        sync_heaps();
-        return SyncedHeaps(None);
-    }
-    let mut rounds = SYNC_ROUNDS.0.lock().unwrap_or_else(|e| e.into_inner());
-    rounds.0 += 1;
-    let mine = rounds.0;
-    drop(rounds);
-    SYNC_ROUNDS.1.notify_all();
-    SyncedHeaps(Some(mine))
+    THREAD.load(std::sync::atomic::Ordering::Acquire)
 }
 
 #[cfg(windows)]
@@ -532,6 +642,15 @@ pub(crate) fn sync_line(frames: f64) {
         );
     }
     let [pages, looked, mirrored, micros, tabled, later, waited] = [0, 1, 2, 3, 4, 5, 6].map(|i| SYNCED[i].swap(0, std::sync::atomic::Ordering::Relaxed));
+    let [asked_at_calls, taken_at_calls, rounds] = [0, 1, 2].map(|i| AT_CALL_COUNTS[i].swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / frames);
+    if sync_at_call() {
+        tracing::info!(
+            "the heaps' records per frame (VICTORY_HEAP_SYNC_AT_CALL=1): {:.1} rounds asked at the title's calls, {:.1} submissions waited for one of those, {:.1} rounds made for what was asked",
+            asked_at_calls,
+            taken_at_calls,
+            rounds
+        );
+    }
     let split = [0, 1, 2, 3, 4].map(|i| SYNC_SPLIT[i].swap(0, std::sync::atomic::Ordering::Relaxed) as f64);
     let kinds = [0, 1, 2, 3, 4].map(|i| SYNCED_KINDS[i].swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / frames);
     if pages == 0 {
