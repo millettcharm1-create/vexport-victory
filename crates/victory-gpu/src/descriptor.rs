@@ -212,10 +212,14 @@ fn sync_early() -> Option<std::time::Duration> {
 /// it writes after is for later lists (the slots of lists submitted are the
 /// card's until a fence behind them is reached, on the console as here). So
 /// a round begun after the call is as good as one begun later, and with the
-/// line some submissions deep it is mostly done before our thread gets
-/// there. A round covers every ask made before it began ([`SyncedHeaps`]
-/// waits for the newest asked at a call), so the asks of calls that come
-/// in a burst are one round, not one each.
+/// line some submissions deep (13-16 in the street) it is mostly done before
+/// our thread gets there. The round travels with the submission through the
+/// line ([`with_call_round`]). A round covers every ask made before it began,
+/// so the asks of calls that come in a burst are one round, not one each.
+///
+/// (The first form of this waited for the newest round asked at any call:
+/// with the line that deep that is a call of just now, and the wait stayed
+/// as it was, 3 ms a frame; play-20261127-130553.)
 #[cfg(windows)]
 fn sync_at_call() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -227,9 +231,27 @@ fn sync_at_call() -> bool {
 #[cfg(windows)]
 static SYNC_ROUNDS: (std::sync::Mutex<(u64, u64)>, std::sync::Condvar) = (std::sync::Mutex::new((0, 0)), std::sync::Condvar::new());
 
-/// With [`sync_at_call`]: the newest round asked at a title's submit call.
 #[cfg(windows)]
-static AT_CALL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+thread_local! {
+    /// The round asked at the call of the submission this thread prepares
+    /// now ([`with_call_round`]; 0: none).
+    static CALL_ROUND: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Runs `prepare`, the preparing of a submission whose call asked `round`
+/// ([`sync_heaps_at_call`]; 0: none was): its [`begin_sync_heaps`] waits for
+/// that round.
+#[cfg(windows)]
+pub(crate) fn with_call_round<R>(round: u64, prepare: impl FnOnce() -> R) -> R {
+    struct Back(u64);
+    impl Drop for Back {
+        fn drop(&mut self) {
+            CALL_ROUND.set(self.0);
+        }
+    }
+    let _back = Back(CALL_ROUND.replace(round));
+    prepare()
+}
 
 /// Since the last frame line, with [`sync_at_call`]: rounds asked at calls,
 /// submissions that waited for one of those instead of asking, and rounds
@@ -243,15 +265,15 @@ static AT_CALL_COUNTS: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::a
 pub(crate) struct SyncedHeaps(Option<u64>);
 
 /// At the title's submit call into the line, with [`sync_at_call`]: a round
-/// is asked for the submission, before it is put in the line.
+/// is asked for the submission, before it is put in the line. Its number,
+/// which goes with the submission ([`with_call_round`]); 0 without.
 #[cfg(windows)]
-pub(crate) fn sync_heaps_at_call() {
+pub(crate) fn sync_heaps_at_call() -> u64 {
     if !sync_at_call() || !sync_thread() {
-        return;
+        return 0;
     }
-    let mine = ask_round();
-    AT_CALL.fetch_max(mine, std::sync::atomic::Ordering::AcqRel);
     AT_CALL_COUNTS[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    ask_round()
 }
 
 /// Asks the thread for a round: its number.
@@ -265,13 +287,11 @@ fn ask_round() -> u64 {
     mine
 }
 
-/// The round a submission being prepared now waits for, if it was asked at
-/// its call: on the thread that serves the line every submission came in by
-/// a call that asked one, so the newest asked (`newest`) was asked at its
-/// own call or after it. Elsewhere, or before any call asked: none.
+/// The round a submission being prepared now waits for, if one was asked at
+/// its call (`asked`; 0: none, as for work that is not the title's).
 #[cfg(windows)]
-fn round_of_call(at_call: bool, serving: bool, newest: u64) -> Option<u64> {
-    (at_call && serving && newest > 0).then_some(newest)
+fn round_of_call(at_call: bool, asked: u64) -> Option<u64> {
+    (at_call && asked > 0).then_some(asked)
 }
 
 /// What a round that began when `asked` rounds had been asked and `done`
@@ -287,12 +307,20 @@ mod at_call_tests {
     use super::{round_of_call, round_over};
 
     #[test]
-    fn a_submission_waits_for_the_round_of_its_call_only_on_the_thread_of_the_line() {
-        assert_eq!(round_of_call(true, true, 7), Some(7));
-        // Our thread before any call asked, another thread, the switch off.
-        assert_eq!(round_of_call(true, true, 0), None);
-        assert_eq!(round_of_call(true, false, 7), None);
-        assert_eq!(round_of_call(false, true, 7), None);
+    fn a_submission_waits_for_the_round_its_own_call_asked() {
+        assert_eq!(round_of_call(true, 7), Some(7));
+        // None was asked (work of ours, or the switch off at the call).
+        assert_eq!(round_of_call(true, 0), None);
+        assert_eq!(round_of_call(false, 7), None);
+    }
+
+    #[test]
+    fn the_round_of_a_call_holds_while_its_submission_is_prepared_and_not_after() {
+        use super::{CALL_ROUND, with_call_round};
+        assert_eq!(CALL_ROUND.get(), 0);
+        let inner = with_call_round(5, || (CALL_ROUND.get(), with_call_round(9, || CALL_ROUND.get()), CALL_ROUND.get()));
+        assert_eq!(inner, (5, 9, 5));
+        assert_eq!(CALL_ROUND.get(), 0);
     }
 
     #[test]
@@ -315,8 +343,7 @@ pub(crate) fn begin_sync_heaps() -> SyncedHeaps {
         sync_heaps();
         return SyncedHeaps(None);
     }
-    let newest = AT_CALL.load(std::sync::atomic::Ordering::Acquire);
-    if let Some(round) = round_of_call(sync_at_call(), crate::queue::serving_line(), newest) {
+    if let Some(round) = round_of_call(sync_at_call(), CALL_ROUND.get()) {
         AT_CALL_COUNTS[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return SyncedHeaps(Some(round));
     }
