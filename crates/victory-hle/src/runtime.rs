@@ -95,6 +95,12 @@ pub struct Title {
     /// Game saves live beside it ([`Title::saves`]).
     pub storage: PathBuf,
     pub storage_bytes: u64,
+    /// The name the console shows for it (`ShellVisuals`'
+    /// `DefaultDisplayName`, empty if none), and the file names of its small
+    /// (44 px) and larger (150 px) logos beside the executable.
+    pub display_name: String,
+    pub small_logo: String,
+    pub logo: String,
 }
 
 impl Title {
@@ -110,11 +116,15 @@ impl Title {
         };
         let id = get("Game/TitleId").and_then(|v| u32::from_str_radix(v, 16).ok());
         let storage_mb = get("Game/PersistentLocalStorage/SizeMB").and_then(|v| v.parse().ok());
+        let shell = |name: &str| attribute(text, "Game/ShellVisuals", name).unwrap_or_default();
         Title {
             id: id.unwrap_or(0),
             store_id: get("Game/StoreId").unwrap_or_default().to_owned(),
             storage: PathBuf::new(),
             storage_bytes: storage_mb.unwrap_or(0) << 20,
+            display_name: shell("DefaultDisplayName"),
+            small_logo: shell("Square44x44Logo"),
+            logo: shell("Square150x150Logo"),
         }
     }
 
@@ -195,6 +205,65 @@ fn elements(text: &str) -> Vec<(String, String)> {
         if closed {
             path.pop();
         }
+    }
+    out
+}
+
+/// The value of attribute `name` of the first element at `path`
+/// (`Game/ShellVisuals`), the predefined entities decoded.
+fn attribute(text: &str, path: &str, name: &str) -> Option<String> {
+    let mut at: Vec<&str> = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find('<') {
+        rest = &rest[open..];
+        let end = if rest.starts_with("<!--") {
+            rest.find("-->").map(|e| e + 3)
+        } else if rest.starts_with("<![CDATA[") {
+            rest.find("]]>").map(|e| e + 3)
+        } else {
+            tag_end(rest)
+        }?;
+        let tag = &rest[1..end - 1];
+        rest = &rest[end..];
+        if tag.starts_with(['!', '?']) {
+            continue;
+        }
+        if let Some(closing) = tag.strip_prefix('/') {
+            if let Some(i) = at.iter().rposition(|n| *n == closing.trim()) {
+                at.truncate(i);
+            }
+            continue;
+        }
+        let closed = tag.ends_with('/');
+        let tag = tag.trim_end_matches('/');
+        let element = tag.split_whitespace().next().unwrap_or("");
+        at.push(element);
+        if at.join("/") == path {
+            return attributes(&tag[element.len()..]).into_iter().find(|(n, _)| n == name).map(|(_, v)| v);
+        }
+        if closed {
+            at.pop();
+        }
+    }
+    None
+}
+
+/// The attributes of a tag's text after its name: `name="value"` or
+/// `name='value'`, the predefined entities decoded.
+fn attributes(mut rest: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    loop {
+        rest = rest.trim_start();
+        let Some(eq) = rest.find('=') else { break };
+        let name = rest[..eq].trim().to_owned();
+        let after = rest[eq + 1..].trim_start();
+        let Some(quote) = after.chars().next().filter(|c| matches!(c, '"' | '\'')) else { break };
+        let Some(close) = after[1..].find(quote) else { break };
+        let value = [("&lt;", "<"), ("&gt;", ">"), ("&quot;", "\""), ("&apos;", "'"), ("&amp;", "&")]
+            .iter()
+            .fold(after[1..1 + close].to_owned(), |v, (entity, c)| v.replace(entity, c));
+        out.push((name, value));
+        rest = &after[close + 2..];
     }
     out
 }
@@ -292,6 +361,19 @@ fn ahead_of_other_programs() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_shown_name_and_logos_come_from_the_shell_visuals() {
+        let text = "<?xml version=\"1.0\"?><Game configVersion=\"1\"><!-- <ShellVisuals DefaultDisplayName=\"no\"/> -->\
+                    <ShellVisuals DefaultDisplayName=\"A &amp; B > C\" Square150x150Logo='big.png'\n  Square44x44Logo=\"small.png\" />\
+                    <TitleId>1</TitleId></Game>";
+        let t = Title::from_manifest(text);
+        assert_eq!(t.display_name, "A & B > C");
+        assert_eq!((t.small_logo.as_str(), t.logo.as_str()), ("small.png", "big.png"));
+        assert_eq!(t.id, 1);
+        let none = Title::from_manifest("<Game><TitleId>2</TitleId></Game>");
+        assert!(none.display_name.is_empty() && none.small_logo.is_empty());
+    }
 
     #[test]
     fn a_quoted_angle_bracket_does_not_end_its_tag() {

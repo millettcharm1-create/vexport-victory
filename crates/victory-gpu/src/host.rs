@@ -8776,6 +8776,127 @@ struct Presenter {
     panel: panel::Panel,
 }
 
+/// What the window shows of the title, as its console would
+/// ([`set_window_look`]): its name, and its small and larger logos as PNG
+/// files' bytes, read from the title's folder when it starts (nothing of
+/// them is in this repository).
+static LOOK: OnceLock<(String, Option<Vec<u8>>, Option<Vec<u8>>)> = OnceLock::new();
+
+/// The window and the logos to give it, for the thread that sets its text.
+type Icons = (usize, Option<Vec<u8>>, Option<Vec<u8>>);
+static ICON_PENDING: Mutex<Option<Icons>> = Mutex::new(None);
+
+/// The window of the title shows `name` (`MicrosoftGame.config`'s
+/// `DefaultDisplayName`), and the logos (PNG files) as its icons; with no
+/// name, the window's own text, as before. Before the first present.
+pub fn set_window_look(name: &str, small_logo: Option<Vec<u8>>, logo: Option<Vec<u8>>) {
+    let _ = LOOK.set((name.trim().to_owned(), small_logo, logo));
+}
+
+/// What the caption says after the title's name (`VICTORY_CAPTION`): `fps`
+/// (the default) the frame rate alone; `full` the frame time and the draws
+/// too, as before; `none` nothing.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum CaptionKind {
+    Fps,
+    Full,
+    Nothing,
+}
+
+fn caption_kind() -> CaptionKind {
+    static KIND: OnceLock<CaptionKind> = OnceLock::new();
+    *KIND.get_or_init(|| caption_kind_of(std::env::var("VICTORY_CAPTION").ok().as_deref()))
+}
+
+fn caption_kind_of(asked: Option<&str>) -> CaptionKind {
+    match asked.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        Some("full") => CaptionKind::Full,
+        Some("none" | "0") => CaptionKind::Nothing,
+        _ => CaptionKind::Fps,
+    }
+}
+
+/// The caption's text after the title's name.
+fn caption_text(kind: CaptionKind, fps: f64, ms: f64, draws: f64) -> String {
+    match kind {
+        CaptionKind::Fps => format!("  \u{2022}  {fps:.0} FPS"),
+        CaptionKind::Full => format!(" | VIctory {fps:.0} fps {ms:.1} ms/frame {draws:.0} draws/frame"),
+        CaptionKind::Nothing => String::new(),
+    }
+}
+
+/// Gives window `hwnd` the logos as its icons: the small one for its
+/// caption, the larger for the taskbar and Alt+Tab (each the other if one
+/// is missing). Posted, and on the window's class too: the window's thread
+/// is the title's, which may not take messages for a while.
+fn set_icons(hwnd: usize, small: Option<&[u8]>, big: Option<&[u8]>) {
+    let icon = |png: &[u8], side: i32| {
+        // SAFETY: the bytes of a PNG file; the system makes an icon of them
+        // (an icon resource may be a PNG) or fails.
+        unsafe { CreateIconFromResourceEx(png, true, 0x0003_0000, side, side, LR_DEFAULTCOLOR) }.ok()
+    };
+    let (Some(first), Some(second)) = (small.or(big), big.or(small)) else {
+        return;
+    };
+    let window = HWND(hwnd as *mut _);
+    let made = [
+        (ICON_SMALL, GCLP_HICONSM, icon(first, 16).or_else(|| icon(first, 0))),
+        (ICON_BIG, GCLP_HICON, icon(second, 32).or_else(|| icon(second, 0))),
+    ];
+    for (which, class, icon) in made {
+        let Some(icon) = icon else {
+            tracing::warn!("the title's logo did not become an icon");
+            continue;
+        };
+        // SAFETY: a window handle and an icon the system made; both are kept
+        // for the rest of the run.
+        unsafe {
+            SetClassLongPtrW(window, class, icon.0 as isize);
+            let _ = PostMessageW(Some(window), WM_SETICON, WPARAM(which as usize), LPARAM(icon.0 as isize));
+        }
+    }
+}
+
+#[cfg(test)]
+mod caption_tests {
+    use super::{CaptionKind, caption_kind_of, caption_text};
+
+    #[test]
+    fn the_caption_says_the_frame_rate_unless_asked_for_more_or_nothing() {
+        assert_eq!(caption_kind_of(None), CaptionKind::Fps);
+        assert_eq!(caption_kind_of(Some("FULL")), CaptionKind::Full);
+        assert_eq!(caption_kind_of(Some("none")), CaptionKind::Nothing);
+        assert_eq!(caption_text(CaptionKind::Fps, 59.6, 16.8, 7000.0), "  \u{2022}  60 FPS");
+        assert!(caption_text(CaptionKind::Full, 30.0, 33.3, 7000.0).contains("33.3 ms/frame 7000 draws/frame"));
+        assert!(caption_text(CaptionKind::Nothing, 30.0, 33.3, 7000.0).is_empty());
+    }
+
+    /// With `VICTORY_GAME_DIR` (a title's folder with its manifest's logos;
+    /// skipped without): each PNG logo there becomes an icon.
+    #[test]
+    fn the_titles_logos_become_icons() {
+        use windows::Win32::UI::WindowsAndMessaging::{CreateIconFromResourceEx, DestroyIcon, LR_DEFAULTCOLOR};
+        let Some(dir) = std::env::var_os("VICTORY_GAME_DIR").map(std::path::PathBuf::from) else {
+            return;
+        };
+        let logos: Vec<_> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("png")))
+            .collect();
+        for path in logos {
+            let png = std::fs::read(&path).expect("readable");
+            // SAFETY: a file's bytes; the icon made is destroyed.
+            let icon = unsafe { CreateIconFromResourceEx(&png, true, 0x0003_0000, 16, 16, LR_DEFAULTCOLOR) };
+            let icon = icon.unwrap_or_else(|e| panic!("{} made no icon: {e}", path.display()));
+            // SAFETY: made just now.
+            unsafe { DestroyIcon(icon) }.expect("destroyed");
+        }
+    }
+}
+
 /// The frame rate, shown in the window's caption every second and logged
 /// every few seconds.
 struct Meter {
@@ -9055,15 +9176,23 @@ impl Meter {
             }
         }
         if self.caption.is_none() {
-            // The window's own text, read without a message.
-            let mut buffer = vec![0u16; 512];
-            // SAFETY: a window handle and a buffer of that length.
-            let n = unsafe { InternalGetWindowText(hwnd, &mut buffer) };
-            buffer.truncate(n.max(0) as usize);
-            self.caption = Some(buffer);
+            // The title's name as its console shows it ([`set_window_look`]),
+            // else the window's own text, read without a message.
+            let look = LOOK.get();
+            let named = look.map(|l| l.0.encode_utf16().collect::<Vec<u16>>()).filter(|n| !n.is_empty());
+            self.caption = Some(named.unwrap_or_else(|| {
+                let mut buffer = vec![0u16; 512];
+                // SAFETY: a window handle and a buffer of that length.
+                let n = unsafe { InternalGetWindowText(hwnd, &mut buffer) };
+                buffer.truncate(n.max(0) as usize);
+                buffer
+            }));
+            if let Some((_, small, big)) = look {
+                *ICON_PENDING.lock().unwrap_or_else(|e| e.into_inner()) = Some((hwnd.0 as usize, small.clone(), big.clone()));
+            }
         }
         let Some(caption) = &self.caption else { return };
-        let text = format!(" | VIctory {fps:.0} fps {ms:.1} ms/frame {draws:.0} draws/frame");
+        let text = caption_text(caption_kind(), fps, ms, draws);
         let mut text: Vec<u16> = caption.iter().copied().chain(text.encode_utf16()).collect();
         text.push(0);
         // Setting the text waits for the window's thread (a title thread,
@@ -9077,6 +9206,10 @@ impl Meter {
                 .name("victory-caption".into())
                 .spawn(|| {
                     loop {
+                        let icons = ICON_PENDING.lock().unwrap_or_else(|e| e.into_inner()).take();
+                        if let Some((hwnd, small, big)) = icons {
+                            set_icons(hwnd, small.as_deref(), big.as_deref());
+                        }
                         let next = PENDING.lock().unwrap_or_else(|e| e.into_inner()).take();
                         match next {
                             // SAFETY: a window handle and a NUL-terminated text.

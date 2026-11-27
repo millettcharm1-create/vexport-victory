@@ -40,6 +40,8 @@ mod book;
 #[cfg(windows)]
 mod host;
 #[cfg(windows)]
+pub use host::set_window_look;
+#[cfg(windows)]
 mod indirect;
 #[cfg(windows)]
 mod inplace;

@@ -93,6 +93,10 @@ pub fn run(
     let manifest =
         std::fs::read_to_string(title_dir.join("MicrosoftGame.config")).unwrap_or_default();
     let title = victory_hle::runtime::Title::from_manifest(&manifest);
+    // Its window shows the name and the logos its console shows, read from
+    // its own folder (`VICTORY_CAPTION` says what follows the name).
+    let logo = |file: &str| (!file.is_empty()).then(|| std::fs::read(title_dir.join(file)).ok()).flatten();
+    victory_hle::set_window_look(&title.display_name, logo(&title.small_logo), logo(&title.logo));
     let storage = cfg.data_subdir(&format!("{:08X}/storage", title.id))?;
     println!(
         "title          {:08X}, storage {} ({} MB)",
