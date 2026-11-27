@@ -1290,13 +1290,45 @@ pub fn map_alias(to: u64, from: u64, len: u64) -> bool {
     let started = std::time::Instant::now();
     let pages = len.div_ceil(PAGE);
     let seen: std::cell::RefCell<Vec<(usize, usize, usize)>> = std::cell::RefCell::new(Vec::new());
+    // Pages whose views were made again (all, without `skips_same`).
+    let made = std::cell::Cell::new(pages);
     let _tally = Defer(|| {
-        let joined = if from == 0 { usize::from(pages > 0) } else { tally::runs(seen.borrow().iter().copied()) };
-        tally::note(2, pages, pages, joined, started)
+        let joined = if from == 0 { usize::from(made.get() > 0) } else { tally::runs(seen.borrow().iter().copied()) };
+        tally::note(2, pages, made.get(), joined, started)
     });
     let _costed = Costed::begin(None);
     let _busy = Busy::begin();
     let mut physical = physical();
+    if let Some(changed) = changed_pages(&physical, to, from, len) {
+        made.set(changed.iter().filter(|c| c.is_some()).count());
+        if made.get() == 0 {
+            return true;
+        }
+        let _changing = victory_gpu::title_memory_remapping();
+        // Each run of pages that change: unmapped together, then mapped page
+        // by page as below.
+        let mut i = 0;
+        while i < changed.len() {
+            if changed[i].is_none() {
+                i += 1;
+                continue;
+            }
+            let first = i;
+            while i < changed.len() && changed[i].is_some() {
+                i += 1;
+            }
+            unmap(&mut physical, to + first * PAGE, (i - first) * PAGE);
+            for (k, page) in changed.iter().enumerate().take(i).skip(first) {
+                if let Some(Some(slice)) = page {
+                    seen.borrow_mut().push((to + k * PAGE, Arc::as_ptr(&slice.section) as usize, slice.index));
+                    if !map(&mut physical, to + k * PAGE, PAGE, slice.clone()) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
     // As in `XMemMapPhysicalPages`: no read in place meets the gap.
     let _changing = victory_gpu::title_memory_remapping();
     unmap(&mut physical, to, len);
@@ -1314,6 +1346,47 @@ pub fn map_alias(to: u64, from: u64, len: u64) -> bool {
         }
     }
     true
+}
+
+/// Whether [`map_alias`] leaves alone the pages that already show what they
+/// are to show (`VICTORY_SKIP_SAME_PAGES=0`: every page unmapped and mapped
+/// again, as before). Each page costs two system calls that wait for a lock
+/// the guards' protection changes take too, and in a crowded street the
+/// title's main thread spent a quarter of its time in them, all from the
+/// GPU's page-mapping copies (a profile, RTX 5070 Ti, 2026-11-27). A page
+/// mapped again to the slice it showed reads the same bytes; its guards and
+/// the GPU side's notes of it stay as they were.
+fn skips_same() -> bool {
+    static ON: LazyLock<bool> = LazyLock::new(|| std::env::var_os("VICTORY_SKIP_SAME_PAGES").is_none_or(|v| v != "0"));
+    *ON
+}
+
+/// For [`map_alias`] with [`skips_same`]: by page of `[to, to + len)`, `None`
+/// where it shows already what it is to show, else what it is to show
+/// (`Some(None)`: nothing). `None` for the whole call where the old way must
+/// be kept: not whole pages, the two ranges overlapping (a source page would
+/// be unmapped before it is read), or a source page not mapped (the call
+/// fails as before).
+#[allow(clippy::type_complexity)]
+fn changed_pages(physical: &Physical, to: usize, from: usize, len: usize) -> Option<Vec<Option<Option<Slice>>>> {
+    if !skips_same() || len == 0 || !to.is_multiple_of(PAGE) || !len.is_multiple_of(PAGE) {
+        return None;
+    }
+    if from != 0 && (!from.is_multiple_of(PAGE) || (from < to + len && to < from + len)) {
+        return None;
+    }
+    (0..len / PAGE)
+        .map(|i| {
+            let wanted = if from == 0 { None } else { Some(physical.slice_at(from + i * PAGE)?) };
+            let now = physical.slice_at(to + i * PAGE);
+            let same = match (&now, &wanted) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(&a.section, &b.section) && a.index == b.index,
+                _ => false,
+            };
+            Some((!same).then_some(wanted))
+        })
+        .collect()
 }
 
 /// [`map_alias`] of many ranges, in order.
@@ -2218,6 +2291,26 @@ mod tests {
         assert!(map_alias(b as u64, at(a, 2) as u64, PAGE as u64));
         // SAFETY: mapped read-write.
         assert_eq!(unsafe { b.cast::<u8>().read() }, 7);
+        // The same copy again: the page shows that already, and stays.
+        assert!(map_alias(b as u64, at(a, 2) as u64, PAGE as u64));
+        // SAFETY: mapped read-write.
+        assert_eq!(unsafe { b.cast::<u8>().read() }, 7);
+        // Two pages, the first the same: only the second is mapped, and the
+        // first still reads what it showed.
+        assert!(map_alias(at(b, 1) as u64, 0, PAGE as u64));
+        assert!(map_alias(b as u64, at(a, 2) as u64, PAGE as u64));
+        assert_eq!(query(at(b, 1)).host.State, MEM_RESERVE);
+        // SAFETY: mapped read-write.
+        assert_eq!(unsafe { b.cast::<u8>().read() }, 7);
+        assert!(map_alias(at(b, 1) as u64, a as u64, PAGE as u64));
+        // SAFETY: page 0 of the three, mapped read-write.
+        assert_eq!(unsafe { at(b, 1).cast::<u8>().read() }, 1);
+        assert!(map_alias(at(b, 1) as u64, 0, PAGE as u64));
+        assert_eq!(query(at(b, 1)).host.State, MEM_RESERVE);
+        // SAFETY: still mapped.
+        assert_eq!(unsafe { b.cast::<u8>().read() }, 7);
+        // An unmapping of a page not mapped: nothing to do.
+        assert!(map_alias(at(b, 1) as u64, 0, PAGE as u64));
         assert!(map_alias(b as u64, 0, PAGE as u64));
         assert_eq!(query(b).host.State, MEM_RESERVE);
         assert!(!map_alias(b as u64, at(a, 1) as u64, PAGE as u64));
