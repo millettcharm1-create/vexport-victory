@@ -1305,6 +1305,15 @@ fn copy_base(desc: &ResourceDesc, first: u32) -> u32 {
     base_level(desc, if large { first.max(1) } else { first })
 }
 
+/// Whether a texture of `width` x `height` texels at level 0 is kept at half
+/// detail ([`detail_side`]): also for host copies made level by level
+/// (`crate::tiles`, `texture.rs` `held_levels`), whose level 0 then gets no
+/// memory of the card while a smaller level is held.
+#[cfg(windows)]
+pub(crate) fn half_detail(width: u32, height: u32) -> bool {
+    detail_side().is_some_and(|side| u64::from(width.max(height)) >= side)
+}
+
 /// Textures from which size on (their longer side at level 0) the host copy
 /// leaves out level 0, so that they take a quarter of the card's memory, at
 /// half the detail: `VICTORY_TEXTURE_DETAIL=<side>` (`full`: none), else
@@ -1646,6 +1655,17 @@ fn hosted(this: This, make: bool) -> Option<Made> {
             } else if detail_side().is_some() {
                 base = copy_base(&r.desc, 0);
             }
+        } else if shape_fits
+            && tiled.is_none()
+            && r.host.placed.load(Relaxed)
+            && alias_of(this).is_none()
+            && detail_side().is_some()
+        {
+            // Levels on demand (`crate::tiles`, which `held_only` gives way
+            // to) makes only some copies level by level, which go to half
+            // detail in `texture.rs` `held_levels`; the others are whole
+            // textures, made here one level down when large enough.
+            base = copy_base(&r.desc, 0);
         }
         let texture = match texture {
             Some(texture) => Some(texture),

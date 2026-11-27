@@ -1198,6 +1198,15 @@ impl Staging {
                 }
             }
         }
+        // Half detail on a smaller card (`crate::resource::half_detail`):
+        // level 0 gets no memory while a smaller level is held, and views
+        // show from that one. The launcher makes host copies this way
+        // (`VICTORY_LEVELS_ON_DEMAND=1`), and `resource.rs` `copy_base` never
+        // came into play: an RTX 5070 stood at 11.8 GB of its 10.4 GB budget
+        // with 6.5 GB of the PC's memory shared with it (2026-11-27).
+        if held & 1 != 0 && held & !1 != 0 && crate::resource::half_detail(self.layout.desc.width, self.layout.desc.height) {
+            held &= !1;
+        }
         held
     }
 
