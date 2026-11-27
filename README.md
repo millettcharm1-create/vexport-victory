@@ -86,6 +86,9 @@ picked ("the processor's preset", "this PC, and the tier").
   `VICTORY_DISPLAY_HZ=120` reports a 120 Hz display, which the game looks for
   before it allows faster frame intervals. Not tested yet: the log's "frame
   interval" line says what the game chose (33.3 ms is 30 fps, 16.7 ms is 60).
+  With 120 Hz the game still chose 30 fps as a Series S. `VICTORY_CONSOLE=series-x`
+  starts it as a Series X instead (more memory, more pixels), to see whether that
+  version allows 60.
 - **Texture detail by card**: full on 16 GB cards; large textures at half detail
   on 12 GB cards; most textures at half detail on 8 GB cards.
 

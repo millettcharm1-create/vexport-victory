@@ -55,6 +55,14 @@ rem budget kept for render targets, 768 to 3,072 MB, and textures loaded until a
 rem budget is left), and says what it picked in the log ("fitted to this card"). Fixed values tuned on
 rem a 16 GB card filled a 12 GB one (2026-11-26). Set VICTORY_CARD_ROOM_FOR_TARGETS_MB or
 rem VICTORY_TEXTURE_ROOM_PERCENT before the launcher to choose yourself.
+rem The console the title is told it runs on (2026-11-27): series-s, as every measurement here was made,
+rem or series-x, which tells the title it has more memory (13.5 GB) and draws more pixels, to see whether
+rem it then allows 60 frames a second ("frame interval" in the log: 33.3 ms is 30, 16.7 ms is 60).
+if not defined VICTORY_CONSOLE set "VICTORY_CONSOLE=series-s"
+if /i not "%VICTORY_CONSOLE%"=="series-s" if /i not "%VICTORY_CONSOLE%"=="series-x" (
+  echo VICTORY_CONSOLE is series-s or series-x. 1>&2
+  exit /b 2
+)
 rem Shaders translated before the game, once per build of the runner (2026-11-27): on a fresh cache the
 rem title translated 1,022 shaders and waited on about 1,000 pipelines while it played, every processor
 rem busy and 1 to 3 frames a second for minutes (a 12-thread PC with a 12 GB card). This does it ahead,
@@ -89,9 +97,9 @@ if not defined VICTORY_LOG if not defined RUST_LOG set "VICTORY_LOG=info"
 rem (A file takes the lines without the console's colour codes.)
 if not defined NO_COLOR set "NO_COLOR=1"
 echo The run's log: %log%
-"%runner%" run "%VICTORY_GAME_DIR%\game_scarlett_master.exe" --console series-s --execute 2>"%log%"
+"%runner%" run "%VICTORY_GAME_DIR%\game_scarlett_master.exe" --console %VICTORY_CONSOLE% --execute 2>"%log%"
 exit /b %errorlevel%
 :console
 if not defined VICTORY_LOG if not defined RUST_LOG set "VICTORY_LOG=warn"
-"%runner%" run "%VICTORY_GAME_DIR%\game_scarlett_master.exe" --console series-s --execute
+"%runner%" run "%VICTORY_GAME_DIR%\game_scarlett_master.exe" --console %VICTORY_CONSOLE% --execute
 exit /b %errorlevel%
