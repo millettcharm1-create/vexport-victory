@@ -64,8 +64,9 @@ if not defined VICTORY_D3D12_BACKGROUND set "VICTORY_D3D12_BACKGROUND=0"
 rem The game's single stores into watched memory done for it, without opening the memory (2026-11-27):
 rem in an A/B run of 41 phases in town (RTX 5070 Ti, diagnostics build) frames were 3.3 ms shorter with it,
 rem corrected for the draws in each phase (VICTORY_COPY_BESIDE: 0.5 ms, not set). VICTORY_STORE_BESIDE=0: off.
-rem Off by default again (2026-11-27), with the one above, until the flicker is traced to one of them.
-rem VICTORY_STORE_BESIDE=1 before the launcher to try it.
+rem On again (2026-11-27): the flicker was the heap records' switch, now removed. Alone in run
+rem play-20261127-172103 about 3 ms a frame faster than run 170113 at the same draws, nothing seen wrong.
+if not defined VICTORY_STORE_BESIDE set "VICTORY_STORE_BESIDE=1"
 rem Keys for this game's pad layout (2026-11-27): the stand-in pad's keys were laid out for Grand Theft Auto
 rem V's buttons, so Shift jumped and Ctrl ran here. Shift runs (left stick's click), Space jumps (A), Ctrl
 rem does what Space did (X); tried by the user on foot. A key named here keeps that in vehicles too (Space
