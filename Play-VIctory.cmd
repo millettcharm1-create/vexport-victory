@@ -63,9 +63,9 @@ rem was 22 % busy and the frames waited for the processor. VICTORY_D3D12_BACKGRO
 if not defined VICTORY_D3D12_BACKGROUND set "VICTORY_D3D12_BACKGROUND=0"
 rem Frames up to 60 a second (2026-11-27): the title asks for a 30th of a second between frames as a
 rem Series S and as a Series X; our frame clock ticks every 60th instead (frame.rs `fps_asked`), and the
-rem world kept its speed. auto: as many as the PC's display shows (its refresh rate, up to 240), where
-rem the PC keeps up; VICTORY_FPS=30: the title's own rate; a number: that cap.
-if not defined VICTORY_FPS set "VICTORY_FPS=auto"
+rem world kept its speed. 240, the most the clock allows: frames as fast as the PC makes them up to
+rem that; auto: the PC's display's refresh rate; VICTORY_FPS=30: the title's own rate; a number: that cap.
+if not defined VICTORY_FPS set "VICTORY_FPS=240"
 rem The console the title is told it runs on (2026-11-27): series-s, as every measurement here was made,
 rem or series-x, which tells the title it has more memory (13.5 GB) and draws more pixels, to see whether
 rem it then allows 60 frames a second ("frame interval" in the log: 33.3 ms is 30, 16.7 ms is 60).
