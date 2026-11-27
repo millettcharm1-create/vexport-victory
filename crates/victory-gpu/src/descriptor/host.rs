@@ -943,6 +943,60 @@ struct Waiting {
     checked: (u64, u64, u64, u8, u64),
 }
 
+/// The due slots of a [`TextureQueue`] as one pass over it took them
+/// ([`TextureQueue::due_taken`]): those looked at before and the others,
+/// each (written, slot, write), and the census. Put in order
+/// ([`DueTaken::order`]) with the queue's lock let go, or under it.
+#[derive(Default)]
+struct DueTaken {
+    again: Vec<(u64, u32, u64)>,
+    fresh: Vec<(u64, u32, u64)>,
+    census: [u64; 5],
+}
+
+impl DueTaken {
+    /// Up to `max` of the slots in the order to serve them (see
+    /// [`TextureQueue::due`]).
+    fn order(mut self, max: usize) -> Vec<(u32, u64)> {
+        // By the number of the write, counted over the run.
+        let newest_first = |a: &(u64, u32, u64), b: &(u64, u32, u64)| b.2.cmp(&a.2);
+        self.again.sort_unstable_by(newest_first);
+        self.fresh.sort_unstable_by(newest_first);
+        let (again, fresh) = (self.again, self.fresh);
+        let mut order: Vec<(u32, u64)> = again.iter().map(|&(_, index, write)| (index, write)).collect();
+        let (mut new, mut old) = (0, fresh.len());
+        while new < old && order.len() < max {
+            order.push((fresh[new].1, fresh[new].2));
+            new += 1;
+            if new < old && order.len() < max {
+                old -= 1;
+                order.push((fresh[old].1, fresh[old].2));
+            }
+        }
+        order.truncate(max);
+        order
+    }
+}
+
+/// Whether the texture pass orders the due slots of the queue with its lock
+/// let go (`VICTORY_QUEUE_ORDER_OUTSIDE=1`; off by default, read once; one of
+/// `VICTORY_AB`'s). The order is the same.
+///
+/// In a crowded street the queue's lock was waited for some 210 ms a second
+/// (the title's threads 78, the lists' 93, the heaps' records 18), for the
+/// most part while the pass held it to sort the due slots, 25,000 and more,
+/// and count them (`texture_slots_due`, 38 ms a second; profile rewrite-1 of
+/// run play-20261127-173234). Every write of a texture view into the heap
+/// takes the lock (`queue_texture`).
+fn order_outside() -> bool {
+    #[cfg(feature = "diagnostics")]
+    if let Some(on) = crate::ab::pick("VICTORY_QUEUE_ORDER_OUTSIDE") {
+        return on;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| crate::switch::on("VICTORY_QUEUE_ORDER_OUTSIDE"))
+}
+
 /// The queue of title slots whose texture view waits to be brought up to
 /// date for shaders that pick textures by index: which are due, and in
 /// which order (no host heap needed, so it is tested without one).
@@ -985,28 +1039,27 @@ impl TextureQueue {
     ///   (run 52: 98% of the drawn pixels had no colour texture in the
     ///   first 3D frames).
     fn due(&self, frame: u64, max: usize) -> Vec<(u32, u64)> {
-        let mut again: Vec<(u64, u32, u64)> = Vec::new();
-        let mut fresh: Vec<(u64, u32, u64)> = Vec::new();
-        for (&index, w) in self.slots.iter().filter(|(_, w)| w.due <= frame) {
-            let class = if w.looks > 0 || w.mapped > 0 { &mut again } else { &mut fresh };
-            class.push((w.written, index, w.write));
-        }
-        // By the number of the write, counted over the run.
-        let newest_first = |a: &(u64, u32, u64), b: &(u64, u32, u64)| b.2.cmp(&a.2);
-        again.sort_unstable_by(newest_first);
-        fresh.sort_unstable_by(newest_first);
-        let mut order: Vec<(u32, u64)> = again.iter().map(|&(_, index, write)| (index, write)).collect();
-        let (mut new, mut old) = (0, fresh.len());
-        while new < old && order.len() < max {
-            order.push((fresh[new].1, fresh[new].2));
-            new += 1;
-            if new < old && order.len() < max {
-                old -= 1;
-                order.push((fresh[old].1, fresh[old].2));
+        self.due_taken(frame).order(max)
+    }
+
+    /// What [`TextureQueue::due`] orders, taken in one pass over the queue,
+    /// with the census beside it: all that needs the queue's lock.
+    fn due_taken(&self, frame: u64) -> DueTaken {
+        let mut taken = DueTaken { census: [self.slots.len() as u64, 0, 0, 0, 0], ..DueTaken::default() };
+        for (&index, w) in self.slots.iter() {
+            if w.mapped > 0 {
+                taken.census[3] += 1;
+            } else if w.looks > 0 {
+                taken.census[2] += 1;
+            }
+            if w.due <= frame {
+                taken.census[1] += 1;
+                taken.census[4] = taken.census[4].max(frame.saturating_sub(w.written));
+                let class = if w.looks > 0 || w.mapped > 0 { &mut taken.again } else { &mut taken.fresh };
+                class.push((w.written, index, w.write));
             }
         }
-        order.truncate(max);
-        order
+        taken
     }
 
     /// The entry of `index` if it is still the write the pass was handed.
@@ -1796,6 +1849,12 @@ impl HostHeap {
     /// ([`TextureQueue::due`]), and the queue's counts
     /// ([`TextureQueue::census`]).
     pub(crate) fn texture_slots_due(&self, frame: u64, max: usize) -> (Vec<(u32, u64)>, [u64; 5]) {
+        if order_outside() {
+            // One pass under the lock, the sorting after it.
+            let taken = self.textures.lock().unwrap_or_else(|e| e.into_inner()).due_taken(frame);
+            let census = taken.census;
+            return (if max == 0 { Vec::new() } else { taken.order(max) }, census);
+        }
         let textures = self.textures.lock().unwrap_or_else(|e| e.into_inner());
         (if max == 0 { Vec::new() } else { textures.due(frame, max) }, textures.census(frame))
     }
@@ -5354,6 +5413,58 @@ mod tests {
     /// slot whose memory is not there is looked at again after
     /// 1, 2, 4 frames up to the limit; and what the pass reports about a
     /// slot written again meanwhile is dropped.
+    /// The due slots ordered outside the queue's lock are those, in the
+    /// same order, with the same census, as ordered under it before.
+    #[test]
+    fn the_due_slots_and_census_taken_in_one_pass_are_those_of_before() {
+        let mut q = TextureQueue::default();
+        let mut seed = 7u64;
+        let mut next = |n: u64| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) % n
+        };
+        for _ in 0..3000 {
+            let index = next(2000) as u32;
+            let frame = 1 + next(50);
+            q.written(index, frame, if next(3) == 0 { frame + next(10) } else { 0 }, next(5) == 0);
+        }
+        let all: Vec<(u32, u64)> = q.due(u64::MAX, usize::MAX);
+        for (k, &(index, write)) in all.iter().enumerate() {
+            match k % 4 {
+                0 => q.later(index, write, 30, 8),
+                1 => q.partly(index, write, 25 + (k as u64 % 10), 4096),
+                _ => {}
+            }
+        }
+        for frame in [0, 10, 26, 33, 40, 60, u64::MAX] {
+            for max in [0, 1, 7, 100, 4096, usize::MAX] {
+                // The order under the lock, as it was.
+                let mut again: Vec<(u64, u32, u64)> = Vec::new();
+                let mut fresh: Vec<(u64, u32, u64)> = Vec::new();
+                for (&index, w) in q.slots.iter().filter(|(_, w)| w.due <= frame) {
+                    let class = if w.looks > 0 || w.mapped > 0 { &mut again } else { &mut fresh };
+                    class.push((w.written, index, w.write));
+                }
+                again.sort_unstable_by(|a, b| b.2.cmp(&a.2));
+                fresh.sort_unstable_by(|a, b| b.2.cmp(&a.2));
+                let mut before: Vec<(u32, u64)> = again.iter().map(|&(_, i, w)| (i, w)).collect();
+                let (mut new, mut old) = (0, fresh.len());
+                while new < old && before.len() < max {
+                    before.push((fresh[new].1, fresh[new].2));
+                    new += 1;
+                    if new < old && before.len() < max {
+                        old -= 1;
+                        before.push((fresh[old].1, fresh[old].2));
+                    }
+                }
+                before.truncate(max);
+                let taken = q.due_taken(frame);
+                assert_eq!(taken.census, q.census(frame), "census at frame {frame}");
+                assert_eq!(taken.order(max), before, "frame {frame}, max {max}");
+            }
+        }
+    }
+
     #[test]
     fn the_texture_queue_serves_the_newest_writes_first() {
         let mut q = TextureQueue::default();
