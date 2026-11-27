@@ -50,12 +50,11 @@ rem 4 the one for a camera under water). 6, not 7: with the first two (bit 1, th
 rem showed flickering black rectangles on an RTX 5070 Ti, gone with 6 (2026-11-26). If the game ends
 rem with a graphics driver reset near water, set VICTORY_WAVE_WIDE_WATER=0 before the launcher.
 if not defined VICTORY_WAVE_WIDE_WATER set "VICTORY_WAVE_WIDE_WATER=6"
-rem Room on the card for textures (RTX 5070 Ti, 2026-11-26): up to 32,000 textures waited all session
-rem (models without textures, specks baked into skin) while the layer kept 3 GB free for render targets
-rem that took 1.1 GB once made, and stopped loading textures at 90 % of the card's budget. 1,536 MB kept
-rem and 94 % give the textures about 2 GB more. Set either before the launcher to have another value.
-if not defined VICTORY_CARD_ROOM_FOR_TARGETS_MB set "VICTORY_CARD_ROOM_FOR_TARGETS_MB=1536"
-if not defined VICTORY_TEXTURE_ROOM_PERCENT set "VICTORY_TEXTURE_ROOM_PERCENT=94"
+rem Room on the card for textures: the layer fits it to the card it runs on (a tenth of the card's
+rem budget kept for render targets, 768 to 3,072 MB, and textures loaded until about 1 GB of the
+rem budget is left), and says what it picked in the log ("fitted to this card"). Fixed values tuned on
+rem a 16 GB card filled a 12 GB one (2026-11-26). Set VICTORY_CARD_ROOM_FOR_TARGETS_MB or
+rem VICTORY_TEXTURE_ROOM_PERCENT before the launcher to choose yourself.
 rem A log of the run, outside the checkout (it holds what the title did): the info lines, among
 rem them the frame line every few seconds that says where a frame's time went and how many draws
 rem were dropped. VICTORY_PLAY_LOG=0: no file, and warnings on the console as before.

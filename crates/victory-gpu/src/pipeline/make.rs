@@ -469,8 +469,12 @@ fn next(screens_only: bool) -> Arc<Pending> {
 }
 
 /// How many workers make pipelines: `asked` (`VICTORY_PIPELINE_WORKERS`, 1 to
-/// 64), else two thirds of the logical processors, 2 to 16. They run below the
-/// title's own threads, and a cold cache queues hundreds at once.
+/// 64), else half the logical processors, 2 to 8. They run below the title's
+/// own threads, and a cold cache queues hundreds at once. Two thirds (up to
+/// 16) held every processor of a smaller PC busy for the minutes a cold
+/// cache takes, with the title's own threads on the rest of each core: half
+/// leaves the title its cores, and the first run fills the cache a little
+/// later (2026-11-26, a report from an RTX 5070 PC).
 fn worker_count(asked: Option<usize>, processors: usize) -> usize {
     worker_count_for(asked, processors, false)
 }
@@ -478,8 +482,8 @@ fn worker_count(asked: Option<usize>, processors: usize) -> usize {
 fn worker_count_for(asked: Option<usize>, processors: usize, limited_ram: bool) -> usize {
     match asked {
         Some(n) => n.clamp(1, 64),
-        None if limited_ram => (processors * 3 / 4).clamp(2, 8),
-        None => (processors * 2 / 3).clamp(2, 16),
+        None if limited_ram => (processors / 2).clamp(2, 6),
+        None => (processors / 2).clamp(2, 8),
     }
 }
 
@@ -562,13 +566,14 @@ mod tests {
     #[test]
     fn worker_count_follows_the_processors_and_the_switch() {
         assert_eq!(worker_count(None, 1), 2);
-        assert_eq!(worker_count(None, 24), 16);
-        assert_eq!(worker_count(None, 64), 16);
+        assert_eq!(worker_count(None, 12), 6);
+        assert_eq!(worker_count(None, 24), 8);
+        assert_eq!(worker_count(None, 64), 8);
         assert_eq!(worker_count(Some(0), 24), 1);
         assert_eq!(worker_count(Some(20), 24), 20);
-        assert_eq!(worker_count_for(None, 8, true), 6);
-        assert_eq!(worker_count_for(None, 16, true), 8);
-        assert_eq!(worker_count_for(None, 24, true), 8);
+        assert_eq!(worker_count_for(None, 8, true), 4);
+        assert_eq!(worker_count_for(None, 16, true), 6);
+        assert_eq!(worker_count_for(None, 24, true), 6);
         assert_eq!(worker_count_for(Some(12), 8, true), 12);
     }
 

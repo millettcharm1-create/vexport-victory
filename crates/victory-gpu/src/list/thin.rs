@@ -299,8 +299,23 @@ fn back_list(kind: u32) -> This {
     list
 }
 
+/// The threads that translate lists: `VICTORY_THIN_THREADS` (1 to 32), else
+/// half the logical processors, 2 to 8. Eight on every PC took as many
+/// threads from a PC of 8 or 12 as from one of 16, where the title's own
+/// threads want the same cores (2026-11-26). 16 logical processors: 8, as
+/// before; 12: 6; 8: 4.
+fn thread_count(asked: Option<usize>, processors: usize) -> usize {
+    match asked {
+        Some(n) => n.clamp(1, 32),
+        None => (processors / 2).clamp(2, 8),
+    }
+}
+
 fn start() {
-    let threads = std::env::var("VICTORY_THIN_THREADS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(8usize).clamp(1, 32);
+    let threads = thread_count(
+        std::env::var("VICTORY_THIN_THREADS").ok().and_then(|v| v.trim().parse().ok()),
+        std::thread::available_parallelism().map_or(16, |n| n.get()),
+    );
     for i in 0..threads {
         let worker = move || {
             crate::cores::keep_many_on_fast_cores("victory-list");
@@ -876,6 +891,16 @@ const MINE: [(usize, *const ()); 52] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_list_threads_follow_the_processors_and_the_switch() {
+        assert_eq!(thread_count(None, 16), 8);
+        assert_eq!(thread_count(None, 12), 6);
+        assert_eq!(thread_count(None, 4), 2);
+        assert_eq!(thread_count(None, 64), 8);
+        assert_eq!(thread_count(Some(12), 8), 12);
+        assert_eq!(thread_count(Some(0), 8), 1);
+    }
 
     /// Every method of the tables that records is written down too: what is
     /// left in both tables alike records nothing.
