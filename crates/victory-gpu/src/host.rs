@@ -444,11 +444,58 @@ fn sweep() {
     if crate::residency::pressured() {
         trim_spare_chunks();
     }
-    crate::pool::room(host().and_then(|h| h.video_memory()));
+    let video = host().and_then(|h| h.video_memory());
+    crate::pool::room(video);
+    memory_line(now, video);
     crate::pipeline::trim_library();
     crate::shadow::let_go_idle();
     crate::texture::let_go_idle();
     crate::resource::let_go_idle();
+}
+
+/// Every so often, in every build: the process's memory, the PC's and the
+/// card's, on one line (`VICTORY_MEMORY_LINE=<seconds>`, 30 unless given;
+/// `0`: none). The memory lines of diagnostics builds (`copystat`) say more,
+/// but a diagnostics build is too slow to play the half hour a leak takes to
+/// show (2026-11-27: within a minute of the world the process held 28 GB of
+/// the PC's 32, the card 15.7 GB of a 15.1 GB budget, and whether that kept
+/// growing could not be told from runs of a few minutes). `video`: what
+/// [`Host::video_memory`] gave.
+fn memory_line(now: u64, video: Option<[u64; 4]>) {
+    use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    static EVERY: OnceLock<u64> = OnceLock::new();
+    let every = *EVERY.get_or_init(|| std::env::var("VICTORY_MEMORY_LINE").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(30u64));
+    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if every == 0 || now < LAST.load(Ordering::Relaxed) + every * 1000 {
+        return;
+    }
+    LAST.store(now, Ordering::Relaxed);
+    let mut process = PROCESS_MEMORY_COUNTERS { cb: size_of::<PROCESS_MEMORY_COUNTERS>() as u32, ..Default::default() };
+    // SAFETY: our own process and a sized structure.
+    unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut process, process.cb) };
+    // SAFETY: plain data the call fills in.
+    let mut pc: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    pc.dwLength = size_of::<MEMORYSTATUSEX>() as u32;
+    // SAFETY: a sized structure.
+    unsafe { GlobalMemoryStatusEx(&mut pc) };
+    let [budget, used, _, shared] = video.unwrap_or_default();
+    let [textures, staging] = crate::pool::memory();
+    let mb = |b: u64| b >> 20;
+    tracing::info!(
+        "memory now (VICTORY_MEMORY_LINE): {} MB private, {} MB of it in memory; the PC has {} MB free and {} MB left to commit; the card {} MB in use of a budget of {} MB, {} MB of the PC's memory shared with it in use; blocks of textures {} MB, of their staging buffers {} MB; frame {}",
+        mb(process.PagefileUsage as u64),
+        mb(process.WorkingSetSize as u64),
+        mb(pc.ullAvailPhys),
+        mb(pc.ullAvailPageFile),
+        mb(used),
+        mb(budget),
+        mb(shared),
+        textures,
+        staging,
+        crate::frame::current()
+    );
 }
 
 /// The number of the newest submission begun, and of the newest of which all
