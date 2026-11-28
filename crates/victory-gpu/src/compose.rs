@@ -160,6 +160,7 @@ impl Composer {
     /// Each presenter command-list slot owns its own pair of SRVs. The swap
     /// chain may have several outstanding presents; the slot is selected by
     /// the completion fence, and its descriptors are only overwritten on reuse.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn record(
         &mut self,
         host: &Host,
