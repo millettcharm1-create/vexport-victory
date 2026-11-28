@@ -2697,7 +2697,10 @@ void main(uint3 g : SV_GroupID, uint i : SV_GroupIndex) {
             }
             sig.unwrap()
         };
-        // Three records of 65,535 x 16 groups: about half the budget each.
+        // Three records of 32,768 x 32 groups of 64 threads: half the budget
+        // each, so two fill it to the last unit (with `REST` off, the
+        // default, a record that does not fit takes nothing, and 65,535 x 16
+        // left 2,048 for the small record).
         let Some((big, big_ptr)) = host.shared_buffer(3 * u64::from(STRIDE)) else {
             return;
         };
@@ -2710,7 +2713,7 @@ void main(uint3 g : SV_GroupID, uint i : SV_GroupIndex) {
         // SAFETY: mapped buffers of these sizes; nothing runs yet.
         unsafe {
             for i in 0..3 {
-                let words = [65535u32, 16, 1];
+                let words = [32768u32, 32, 1];
                 std::ptr::copy_nonoverlapping(
                     words.as_ptr().cast::<u8>(),
                     big_ptr.add(i * STRIDE as usize),
@@ -3155,8 +3158,14 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_DispatchThreadID) {
         };
         let pass = make_from(&warp.device, batch::SOURCE).expect("the batched clamp must compile on WARP");
         const BUDGET: u32 = 1 << 27;
-        // 2^26 vertices each, as much as a draw is let run: two fill it.
-        for (times, records, filled) in [(1u32, 3u64, 2usize), (2, 1, 1), (1, 1, 1), (3, 1, 0)] {
+        // 2^26 vertices each, as much as a draw is let run: two fill it. A job
+        // read three times asks more than the whole budget: it runs empty, and
+        // takes the rest only with `REST` (`VICTORY_INDIRECT_REST=1`; off by
+        // default, when it takes nothing).
+        let over = if super::rest() == 1 { BUDGET } else { 0 };
+        for (times, records, filled, charged) in
+            [(1u32, 3u64, 2usize, BUDGET), (2, 1, 1, BUDGET), (1, 1, 1, 1 << 26), (3, 1, 0, over)]
+        {
             let (_src, src_ptr, src_gpu) = warp.shared_buffer(64 << 10);
             let (_budget, budget_ptr, budget_gpu) = warp.shared_buffer(256);
             let (back, back_ptr, _) = warp.shared_buffer(1024);
@@ -3193,7 +3202,7 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_DispatchThreadID) {
             };
             assert_eq!(out.iter().filter(|&&v| v == 1 << 22).count(), filled, "{times} times {records}: {out:?}");
             assert!(out.iter().all(|&v| v == 0 || v == 1 << 22));
-            assert_eq!(spent, BUDGET.min((1 << 26) * times * records as u32));
+            assert_eq!(spent, charged, "{times} times {records}");
         }
     }
 
